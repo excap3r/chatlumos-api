@@ -91,7 +91,7 @@ def is_off_peak_time():
     return False
 
 # 3. Extract key concepts using LLM
-def extract_concepts_with_llm(chunk: str, api_key: str) -> Dict[str, Any]:
+def extract_concepts_with_llm(chunk: str, api_key: str, author_name: str) -> Dict[str, Any]:
     """Use LLM to extract key concepts, Q&A pairs, and summary from a text chunk."""
     DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
     
@@ -112,20 +112,20 @@ def extract_concepts_with_llm(chunk: str, api_key: str) -> Dict[str, Any]:
             # Add a note about the truncation
             chunk += "\n\n[... text truncated due to length limitations ...]"
     
-    system_prompt = """
-    Jsi asistent pro extrakci informací z přepsaného textu přednášky Ivy Adamcové (duchovní učitelky). Extrahuj pouze klíčové informace strukturovaně bez zbytečného textu.
+    system_prompt = f"""
+    Jsi asistent pro extrakci informací z přepsaného textu přednášky {author_name} (duchovní učitelky). Extrahuj pouze klíčové informace strukturovaně bez zbytečného textu.
     
-    Při extrakci používej přímo jméno "Iva Adamcová" nebo "Ivanka Adamcová" místo obecných termínů jako "řečnice", "přednášející", "autorka" apod.
+    Při extrakci používej přímo jméno "{author_name}" místo obecných termínů jako "řečnice", "přednášející", "autorka" apod.
     
     Vrať odpověď POUZE jako JSON v následujícím formátu (bez kódu markdown nebo vysvětlení):
-    {
+    {{
       "key_concepts": [
-        {"concept": "Název konceptu", "explanation": "Vysvětlení konceptu (max 100 slov)"}
+        {{"concept": "Název konceptu", "explanation": "Vysvětlení konceptu (max 100 slov)"}}
       ],
       "qa_pairs": [
-        {"question": "Otázka z textu", "answer": "Odpověď na otázku (max 80 slov)"}
+        {{"question": "Otázka z textu", "answer": "Odpověď na otázku (max 80 slov)"}}
       ]
-    }
+    }}
     """
     
     headers = {
@@ -341,17 +341,17 @@ def extract_concepts_with_llm(chunk: str, api_key: str) -> Dict[str, Any]:
         }
 
 # 4. Deduplicate concepts
-def deduplicate_concepts(concepts: List[Dict]) -> List[Dict]:
+def deduplicate_concepts(concepts: List[Dict], author_name: str) -> List[Dict]:
     """Remove duplicate concepts and merge similar ones."""
     # Create a dictionary to track concepts by name
     concept_dict = {}
     
     # Regular expressions to find generic speaker references
     speaker_patterns = [
-        (r'\břečnice\b', 'Iva Adamcová'),
-        (r'\bpřednášející\b', 'Iva Adamcová'),
-        (r'\bautorka\b', 'Iva Adamcová'),
-        (r'\bmluvčí\b', 'Iva Adamcová')
+        (r'\břečnice\b', author_name),
+        (r'\bpřednášející\b', author_name),
+        (r'\bautorka\b', author_name),
+        (r'\bmluvčí\b', author_name)
     ]
     
     for concept in concepts:
@@ -359,7 +359,7 @@ def deduplicate_concepts(concepts: List[Dict]) -> List[Dict]:
         if not isinstance(concept, dict) or 'concept' not in concept or 'explanation' not in concept:
             continue
         
-        # Replace generic speaker references with Iva Adamcová's name
+        # Replace generic speaker references with the author's name
         for pattern, replacement in speaker_patterns:
             if 'explanation' in concept:
                 concept['explanation'] = re.sub(pattern, replacement, concept['explanation'], flags=re.IGNORECASE)
@@ -376,17 +376,17 @@ def deduplicate_concepts(concepts: List[Dict]) -> List[Dict]:
     
     return list(concept_dict.values())
 
-# Process Q&A pairs to replace generic speaker references
-def process_qa_pairs(qa_pairs: List[Dict]) -> List[Dict]:
-    """Replace generic speaker references with Iva Adamcová's name in Q&A pairs."""
+# Process Q&A pairs
+def process_qa_pairs(qa_pairs: List[Dict], author_name: str) -> List[Dict]:
+    """Replace generic speaker references with the author's name in Q&A pairs."""
     processed_pairs = []
     
     # Regular expressions to find generic speaker references
     speaker_patterns = [
-        (r'\břečnice\b', 'Iva Adamcová'),
-        (r'\bpřednášející\b', 'Iva Adamcová'),
-        (r'\bautorka\b', 'Iva Adamcová'),
-        (r'\bmluvčí\b', 'Iva Adamcová')
+        (r'\břečnice\b', author_name),
+        (r'\bpřednášející\b', author_name),
+        (r'\bautorka\b', author_name),
+        (r'\bmluvčí\b', author_name)
     ]
     
     for qa in qa_pairs:
@@ -433,7 +433,29 @@ def generate_combined_summary(concepts, qa_pairs, chunk_count):
     """Generate a brief summary of the entire document from key concepts and Q&A pairs."""
     top_concepts = concepts[:5] if len(concepts) > 5 else concepts
     
-    summary = "# Shrnutí extrakce učení Ivy Adamcové\n\n"
+    # Get author name from first concept if available, fallback to a default
+    author_name = "Author"
+    if concepts and len(concepts) > 0 and 'explanation' in concepts[0]:
+        # Try to extract author name from any explanation that contains it
+        for concept in concepts:
+            if 'Adamcová' in concept.get('explanation', ''):
+                author_name = "Iva Adamcová"
+                break
+            # Look for other common author references that might be in the explanation
+            for name_pattern in ['učitel', 'přednášející', 'autor']:
+                if name_pattern in concept.get('explanation', '').lower():
+                    # Try to get nearby words that might be names
+                    text = concept['explanation']
+                    words = text.split()
+                    for i, word in enumerate(words):
+                        if name_pattern in word.lower() and i+1 < len(words):
+                            # Next word might be author name
+                            potential_name = words[i+1]
+                            if potential_name[0].isupper():
+                                author_name = potential_name
+                                break
+    
+    summary = f"# Shrnutí extrakce učení {author_name}\n\n"
     
     # Add statistics
     summary += f"## Statistiky extrakce\n"
@@ -465,7 +487,7 @@ def create_summary_document(document_id: int, output_dir: str):
     qa_pairs = db_utils.get_all_qa_pairs(document_id)
     
     # Create summary content
-    content = f"# Shrnutí přednášky Ivy Adamcové - {document_info['title']}\n\n"
+    content = f"# Shrnutí přednášky {document_info['author']} - {document_info['title']}\n\n"
     content += f"Datum zpracování: {document_info['processed_date']}\n\n"
     
     # Add key concepts section
@@ -503,8 +525,12 @@ def process_single_chunk(chunk_idx: int, chunk: str, api_key: str, document_id: 
     # Update chunk status to processing
     db_utils.update_chunk_status(chunk_id, "processing")
     
+    # Get author name from document info
+    document_info = db_utils.get_document_info(document_id)
+    author_name = document_info['author'] if document_info else "Unknown Author"
+    
     # Extract key concepts and Q&A pairs
-    result = extract_concepts_with_llm(chunk, api_key)
+    result = extract_concepts_with_llm(chunk, api_key, author_name)
     
     # Extract concepts and Q&A pairs
     concepts = result.get("key_concepts", [])
@@ -545,6 +571,9 @@ def process_pdf_with_llm(chunks: List[str], api_keys: List[str], document_id: in
     if not document_info:
         print(f"Error: Could not retrieve document information for ID {document_id}")
         return
+    
+    # Get author name from document info
+    author_name = document_info['author']
     
     print(f"Processing document: {document_info['filename']}")
     
@@ -629,8 +658,11 @@ def process_pdf_with_llm(chunks: List[str], api_keys: List[str], document_id: in
     progress_bar.close()
     
     # Deduplicate concepts and Q&A pairs
-    unique_concepts = deduplicate_concepts(all_concepts)
+    unique_concepts = deduplicate_concepts(all_concepts, author_name)
     unique_qa_pairs = deduplicate_qa_pairs(all_qa_pairs)
+    
+    # Process QA pairs to replace generic speaker references
+    unique_qa_pairs = process_qa_pairs(unique_qa_pairs, author_name)
     
     # Generate combined summary
     combined_summary = generate_combined_summary(unique_concepts, unique_qa_pairs, len(chunks_to_process))
@@ -695,6 +727,209 @@ def parse_arguments():
     parser.add_argument("--create_visualization", action="store_true", help="Create visualization for existing document")
     
     return parser.parse_args()
+
+# 7. Create a concept visualization
+def create_concept_visualization(concepts: List[Dict], output_dir: str, author_name: str):
+    """Create a simple HTML visualization of concepts using D3.js."""
+    html_template = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <title>Koncept Mapa - {author_name}</title>
+        <script src="https://d3js.org/d3.v7.min.js"></script>
+        <style>
+            body {{ font-family: Arial, sans-serif; margin: 0; padding: 20px; background-color: #f7f9fc; }}
+            h1 {{ color: #444; text-align: center; margin-bottom: 30px; }}
+            .node {{ cursor: pointer; }}
+            .node circle {{ 
+                stroke-width: 2px; 
+                transition: all 0.3s ease;
+            }}
+            .node text {{ 
+                font: 12px sans-serif; 
+                fill: #333;
+                transition: all 0.3s ease;
+            }}
+            .node:hover circle {{ 
+                stroke-width: 4px; 
+            }}
+            .node:hover text {{ 
+                font-weight: bold;
+                font-size: 14px;
+            }}
+            .link {{ 
+                fill: none; 
+                stroke: #ddd; 
+                stroke-width: 1.5px; 
+            }}
+            .tooltip {{ 
+                position: absolute; 
+                background: white; 
+                border: 1px solid #ddd; 
+                padding: 15px; 
+                border-radius: 8px; 
+                max-width: 320px; 
+                z-index: 10; 
+                box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+                line-height: 1.5;
+                color: #333;
+                font-size: 14px;
+            }}
+            #concept-list {{
+                max-width: 800px;
+                margin: 0 auto;
+                padding: 20px;
+                background: white;
+                border-radius: 8px;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                margin-top: 40px;
+            }}
+            #concept-list h2 {{
+                color: #555;
+                border-bottom: 1px solid #eee;
+                padding-bottom: 10px;
+            }}
+            .concept-item {{
+                margin-bottom: 15px;
+                padding-bottom: 15px;
+                border-bottom: 1px solid #f0f0f0;
+            }}
+            .concept-item h3 {{
+                color: #3366cc;
+                margin-bottom: 5px;
+            }}
+            .concept-item p {{
+                margin-top: 5px;
+                line-height: 1.6;
+            }}
+        </style>
+    </head>
+    <body>
+        <h1>Mapa konceptů z přednášky {author_name}</h1>
+        <div id="visualization"></div>
+        
+        <script>
+        // Data from extracted concepts
+        const conceptsData = CONCEPTS_JSON_PLACEHOLDER;
+        
+        // Create hierarchical structure
+        const root = {{
+            name: "Hlavní koncepty",
+            children: conceptsData.map(c => ({{ 
+                name: c.concept, 
+                explanation: c.explanation,
+                size: c.explanation.length / 10 // Size based on explanation length
+            }}))
+        }};
+        
+        // Set up dimensions and radius
+        const width = 960;
+        const height = 700;
+        const radius = Math.min(width, height) / 2 - 90;
+        
+        // Create tooltip
+        const tooltip = d3.select("body").append("div")
+            .attr("class", "tooltip")
+            .style("opacity", 0);
+            
+        // Create SVG
+        const svg = d3.select("#visualization").append("svg")
+            .attr("width", width)
+            .attr("height", height)
+            .append("g")
+            .attr("transform", `translate(${{width / 2}},${{height / 2}})`);
+            
+        // Create cluster layout
+        const cluster = d3.cluster()
+            .size([360, radius]);
+            
+        // Process data
+        const hierarchy = d3.hierarchy(root);
+        cluster(hierarchy);
+        
+        // Create category colors
+        const colors = d3.scaleOrdinal(d3.schemeCategory10);
+        
+        // Create links
+        svg.selectAll("path")
+            .data(hierarchy.links())
+            .enter()
+            .append("path")
+            .attr("class", "link")
+            .attr("d", d3.linkRadial()
+                .angle(d => d.x * Math.PI / 180)
+                .radius(d => d.y));
+                
+        // Create nodes
+        const node = svg.selectAll(".node")
+            .data(hierarchy.descendants())
+            .enter()
+            .append("g")
+            .attr("class", "node")
+            .attr("transform", d => `rotate(${{d.x - 90}}) translate(${{d.y}}, 0)`)
+            .on("mouseover", function(event, d) {{
+                if (d.data.explanation) {{
+                    tooltip.transition().duration(200).style("opacity", .9);
+                    tooltip.html(`<strong>${{d.data.name}}</strong><br>${{d.data.explanation}}`)
+                        .style("left", (event.pageX + 10) + "px")
+                        .style("top", (event.pageY - 28) + "px");
+                }}
+            }})
+            .on("mouseout", function() {{
+                tooltip.transition().duration(500).style("opacity", 0);
+            }});
+                
+        // Add circles to nodes
+        node.append("circle")
+            .attr("r", d => d.data.size ? Math.min(Math.max(d.data.size, 5), 15) : 5)
+            .style("fill", d => d.depth === 0 ? "#fff" : colors(d.data.name.length % 10))
+            .style("stroke", d => d.depth === 0 ? "#999" : colors(d.data.name.length % 10));
+            
+        // Add text to nodes
+        node.append("text")
+            .attr("dy", ".31em")
+            .attr("x", d => d.x < 180 ? 10 : -10)
+            .attr("text-anchor", d => d.x < 180 ? "start" : "end")
+            .attr("transform", d => d.x < 180 ? null : "rotate(180)")
+            .text(d => d.data.name);
+            
+        </script>
+        
+        <!-- Add a list of concepts below the visualization -->
+        <div id="concept-list">
+            <h2>Seznam klíčových konceptů</h2>
+            <div id="concepts">
+                <!-- Concepts will be inserted here -->
+            </div>
+        </div>
+        
+        <script>
+            // Add concepts to the list
+            const conceptsList = document.getElementById('concepts');
+            conceptsData.forEach((concept, index) => {{
+                const item = document.createElement('div');
+                item.className = 'concept-item';
+                item.innerHTML = `
+                    <h3>${{index + 1}}. ${{concept.concept}}</h3>
+                    <p>${{concept.explanation}}</p>
+                `;
+                conceptsList.appendChild(item);
+            }});
+        </script>
+    </body>
+    </html>
+    """
+    
+    # Replace placeholder with actual concepts data
+    html_content = html_template.replace('CONCEPTS_JSON_PLACEHOLDER', json.dumps(concepts, ensure_ascii=False))
+    
+    # Write HTML file
+    visualization_path = os.path.join(output_dir, "concept_visualization.html")
+    with open(visualization_path, "w", encoding="utf-8") as f:
+        f.write(html_content)
+    
+    print(f"Concept visualization saved to {visualization_path}")
 
 # Main function
 if __name__ == "__main__":
@@ -762,10 +997,16 @@ if __name__ == "__main__":
             print("Error: --document_id is required with --create_visualization")
             sys.exit(1)
         
+        # Get document info for author name
+        document_info = db_utils.get_document_info(args.document_id)
+        if not document_info:
+            print(f"Error: Document ID {args.document_id} not found")
+            sys.exit(1)
+            
         concepts = db_utils.get_all_concepts(args.document_id)
         if concepts:
             output_dir = "."  # Current directory
-            create_concept_visualization(concepts, output_dir)
+            create_concept_visualization(concepts, output_dir, document_info['author'])
             print(f"Visualization created: concept_visualization.html")
         else:
             print(f"No concepts found for document ID {args.document_id}")
@@ -830,207 +1071,4 @@ if __name__ == "__main__":
         if not (args.list_documents or args.create_summary or args.create_visualization or args.export_data):
             print("Error: Please provide either a PDF path to process or use --list_documents, --export_data, --create_summary, or --create_visualization")
             print("\nFor help, use: python pdf_wisdom_extractor.py -h")
-            sys.exit(1)
-
-# 7. Create a concept visualization
-def create_concept_visualization(concepts: List[Dict], output_dir: str):
-    """Create a simple HTML visualization of concepts using D3.js."""
-    html_template = """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="utf-8">
-        <title>Koncept Mapa - Iva Adamcová</title>
-        <script src="https://d3js.org/d3.v7.min.js"></script>
-        <style>
-            body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background-color: #f7f9fc; }
-            h1 { color: #444; text-align: center; margin-bottom: 30px; }
-            .node { cursor: pointer; }
-            .node circle { 
-                stroke-width: 2px; 
-                transition: all 0.3s ease;
-            }
-            .node text { 
-                font: 12px sans-serif; 
-                fill: #333;
-                transition: all 0.3s ease;
-            }
-            .node:hover circle { 
-                stroke-width: 4px; 
-            }
-            .node:hover text { 
-                font-weight: bold;
-                font-size: 14px;
-            }
-            .link { 
-                fill: none; 
-                stroke: #ddd; 
-                stroke-width: 1.5px; 
-            }
-            .tooltip { 
-                position: absolute; 
-                background: white; 
-                border: 1px solid #ddd; 
-                padding: 15px; 
-                border-radius: 8px; 
-                max-width: 320px; 
-                z-index: 10; 
-                box-shadow: 0 4px 8px rgba(0,0,0,0.1);
-                line-height: 1.5;
-                color: #333;
-                font-size: 14px;
-            }
-            #concept-list {
-                max-width: 800px;
-                margin: 0 auto;
-                padding: 20px;
-                background: white;
-                border-radius: 8px;
-                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-                margin-top: 40px;
-            }
-            #concept-list h2 {
-                color: #555;
-                border-bottom: 1px solid #eee;
-                padding-bottom: 10px;
-            }
-            .concept-item {
-                margin-bottom: 15px;
-                padding-bottom: 15px;
-                border-bottom: 1px solid #f0f0f0;
-            }
-            .concept-item h3 {
-                color: #3366cc;
-                margin-bottom: 5px;
-            }
-            .concept-item p {
-                margin-top: 5px;
-                line-height: 1.6;
-            }
-        </style>
-    </head>
-    <body>
-        <h1>Mapa konceptů z přednášky Ivy Adamcové</h1>
-        <div id="visualization"></div>
-        
-        <script>
-        // Data from extracted concepts
-        const conceptsData = CONCEPTS_JSON_PLACEHOLDER;
-        
-        // Create hierarchical structure
-        const root = {
-            name: "Hlavní koncepty",
-            children: conceptsData.map(c => ({ 
-                name: c.concept, 
-                explanation: c.explanation,
-                size: c.explanation.length / 10 // Size based on explanation length
-            }))
-        };
-        
-        // Set up dimensions and radius
-        const width = 960;
-        const height = 700;
-        const radius = Math.min(width, height) / 2 - 90;
-        
-        // Create tooltip
-        const tooltip = d3.select("body").append("div")
-            .attr("class", "tooltip")
-            .style("opacity", 0);
-            
-        // Create SVG
-        const svg = d3.select("#visualization").append("svg")
-            .attr("width", width)
-            .attr("height", height)
-            .append("g")
-            .attr("transform", `translate(${width / 2},${height / 2})`);
-            
-        // Create cluster layout
-        const cluster = d3.cluster()
-            .size([360, radius]);
-            
-        // Process data
-        const hierarchy = d3.hierarchy(root);
-        cluster(hierarchy);
-        
-        // Create category colors
-        const colors = d3.scaleOrdinal(d3.schemeCategory10);
-        
-        // Create links
-        svg.selectAll("path")
-            .data(hierarchy.links())
-            .enter()
-            .append("path")
-            .attr("class", "link")
-            .attr("d", d3.linkRadial()
-                .angle(d => d.x * Math.PI / 180)
-                .radius(d => d.y));
-                
-        // Create nodes
-        const node = svg.selectAll(".node")
-            .data(hierarchy.descendants())
-            .enter()
-            .append("g")
-            .attr("class", "node")
-            .attr("transform", d => `rotate(${d.x - 90}) translate(${d.y}, 0)`)
-            .on("mouseover", function(event, d) {
-                if (d.data.explanation) {
-                    tooltip.transition().duration(200).style("opacity", .9);
-                    tooltip.html(`<strong>${d.data.name}</strong><br>${d.data.explanation}`)
-                        .style("left", (event.pageX + 10) + "px")
-                        .style("top", (event.pageY - 28) + "px");
-                }
-            })
-            .on("mouseout", function() {
-                tooltip.transition().duration(500).style("opacity", 0);
-            });
-                
-        // Add circles to nodes
-        node.append("circle")
-            .attr("r", d => d.data.size ? Math.min(Math.max(d.data.size, 5), 15) : 5)
-            .style("fill", d => d.depth === 0 ? "#fff" : colors(d.data.name.length % 10))
-            .style("stroke", d => d.depth === 0 ? "#999" : colors(d.data.name.length % 10));
-            
-        // Add text to nodes
-        node.append("text")
-            .attr("dy", ".31em")
-            .attr("x", d => d.x < 180 ? 10 : -10)
-            .attr("text-anchor", d => d.x < 180 ? "start" : "end")
-            .attr("transform", d => d.x < 180 ? null : "rotate(180)")
-            .text(d => d.data.name);
-            
-        </script>
-        
-        <!-- Add a list of concepts below the visualization -->
-        <div id="concept-list">
-            <h2>Seznam klíčových konceptů</h2>
-            <div id="concepts">
-                <!-- Concepts will be inserted here -->
-            </div>
-        </div>
-        
-        <script>
-            // Add concepts to the list
-            const conceptsList = document.getElementById('concepts');
-            conceptsData.forEach((concept, index) => {
-                const item = document.createElement('div');
-                item.className = 'concept-item';
-                item.innerHTML = `
-                    <h3>${index + 1}. ${concept.concept}</h3>
-                    <p>${concept.explanation}</p>
-                `;
-                conceptsList.appendChild(item);
-            });
-        </script>
-    </body>
-    </html>
-    """
-    
-    # Replace placeholder with actual concepts data
-    html_content = html_template.replace('CONCEPTS_JSON_PLACEHOLDER', json.dumps(concepts, ensure_ascii=False))
-    
-    # Write HTML file
-    visualization_path = os.path.join(output_dir, "concept_visualization.html")
-    with open(visualization_path, "w", encoding="utf-8") as f:
-        f.write(html_content)
-    
-    print(f"Concept visualization saved to {visualization_path}") 
+            sys.exit(1) 
