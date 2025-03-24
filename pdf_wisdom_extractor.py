@@ -12,9 +12,16 @@ import datetime
 import pytz
 import sys
 from tqdm import tqdm
+import random
+from collections import defaultdict
+import threading
 
 # Import database utilities
 import db_utils
+
+# Global rate limiting
+api_rate_limits = defaultdict(lambda: {"last_call": 0, "backoff": 0})
+api_lock = threading.Lock()  # Lock for thread-safe API call scheduling
 
 # Try to import tiktoken, but use a fallback if not available
 try:
@@ -93,7 +100,21 @@ def is_off_peak_time():
 # 3. Extract key concepts using LLM
 def extract_concepts_with_llm(chunk: str, api_key: str, author_name: str) -> Dict[str, Any]:
     """Use LLM to extract key concepts, Q&A pairs, and summary from a text chunk."""
+    global api_rate_limits, api_lock
     DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
+    
+    # Apply rate limiting if needed for this key
+    with api_lock:
+        key_limits = api_rate_limits[api_key]
+        current_time = time.time()
+        time_since_last_call = current_time - key_limits["last_call"]
+        if time_since_last_call < key_limits["backoff"]:
+            sleep_time = key_limits["backoff"] - time_since_last_call
+            print(f"  - Rate limiting: sleeping for {sleep_time:.2f} seconds")
+            time.sleep(sleep_time)
+        
+        # Update last call time
+        api_rate_limits[api_key]["last_call"] = time.time()
     
     # Check if we're in off-peak hours (50-75% discount)
     off_peak = is_off_peak_time()
@@ -153,6 +174,10 @@ def extract_concepts_with_llm(chunk: str, api_key: str, author_name: str) -> Dic
         
         if response.status_code == 200:
             result = response.json()
+            # Reset backoff for successful calls but maintain a minimal spacing
+            with api_lock:
+                api_rate_limits[api_key]["backoff"] = max(0.5, api_rate_limits[api_key]["backoff"] * 0.5)
+            
             content = result["choices"][0]["message"]["content"]
             
             # Check for token usage if available
@@ -255,6 +280,23 @@ def extract_concepts_with_llm(chunk: str, api_key: str, author_name: str) -> Dic
             error_message = f"API request failed with status {response.status_code}"
             try:
                 error_details = response.json()
+                
+                # Check for rate limit errors
+                if response.status_code == 429 or "rate limit" in str(error_details).lower():
+                    # Exponential backoff with jitter
+                    with api_lock:
+                        current_backoff = api_rate_limits[api_key]["backoff"]
+                        new_backoff = max(2.0, current_backoff * 2) + random.uniform(0, 1)
+                        api_rate_limits[api_key]["backoff"] = min(30, new_backoff)  # Cap at 30 seconds
+                        
+                        print(f"  - Rate limit detected! Adding backoff of {api_rate_limits[api_key]['backoff']:.2f} seconds")
+                    
+                    time.sleep(api_rate_limits[api_key]["backoff"])
+                    
+                    # Retry immediately with the same chunks
+                    print("  - Retrying request after rate limit backoff...")
+                    return extract_concepts_with_llm(chunk, api_key, author_name)
+                
                 # Check for token limit errors
                 if "error" in error_details and "maximum context length" in error_details.get("error", {}).get("message", ""):
                     # Retry with a shorter chunk
@@ -516,50 +558,137 @@ def process_single_chunk(chunk_idx: int, chunk: str, api_key: str, document_id: 
     print(f"\nProcessing chunk {chunk_idx+1}...")
     start_time = time.time()
     
-    # Get the chunk_id from the database
-    chunk_id = db_utils.create_document_chunk(document_id, chunk_idx, chunk)
-    if not chunk_id:
-        print(f"  - Error: Failed to create chunk record in database")
+    try:
+        # Get the chunk_id from the database - use a new connection for thread safety
+        conn = db_utils.get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                "INSERT INTO document_chunks (document_id, chunk_index, chunk_text, status) VALUES (%s, %s, %s, %s) ON DUPLICATE KEY UPDATE status = %s, chunk_text = %s",
+                (document_id, chunk_idx, chunk, "processing", "processing", chunk)
+            )
+            conn.commit()
+            
+            # Get the chunk_id
+            cursor.execute(
+                "SELECT chunk_id FROM document_chunks WHERE document_id = %s AND chunk_index = %s",
+                (document_id, chunk_idx)
+            )
+            result = cursor.fetchone()
+            chunk_id = result[0] if result else None
+        finally:
+            cursor.close()
+            conn.close()
+            
+        if not chunk_id:
+            print(f"  - Error: Failed to create chunk record in database")
+            return chunk_idx, [], []
+        
+        # Get author name from document info
+        document_info = db_utils.get_document_info(document_id)
+        author_name = document_info['author'] if document_info else "Unknown Author"
+        
+        # Extract key concepts and Q&A pairs
+        result = extract_concepts_with_llm(chunk, api_key, author_name)
+        
+        # Extract concepts and Q&A pairs
+        concepts = result.get("key_concepts", [])
+        qa_pairs = result.get("qa_pairs", [])
+        
+        # Store concepts and QA pairs in the database - use new connections for thread safety
+        if concepts:
+            conn = db_utils.get_connection()
+            cursor = conn.cursor()
+            try:
+                # Insert concepts
+                for concept in concepts:
+                    cursor.execute(
+                        """
+                        INSERT INTO concepts (chunk_id, document_id, concept_name, explanation) 
+                        VALUES (%s, %s, %s, %s)
+                        ON DUPLICATE KEY UPDATE
+                            explanation = IF(LENGTH(VALUES(explanation)) > LENGTH(explanation), VALUES(explanation), explanation),
+                            chunk_id = IF(LENGTH(VALUES(explanation)) > LENGTH(explanation), VALUES(chunk_id), chunk_id)
+                        """,
+                        (chunk_id, document_id, concept.get('concept', ''), concept.get('explanation', ''))
+                    )
+                conn.commit()
+            except Exception as e:
+                print(f"  - Warning: Failed to store concepts in database: {str(e)}")
+                conn.rollback()
+            finally:
+                cursor.close()
+                conn.close()
+        
+        if qa_pairs:
+            conn = db_utils.get_connection()
+            cursor = conn.cursor()
+            try:
+                # Insert QA pairs
+                for qa in qa_pairs:
+                    cursor.execute(
+                        """
+                        INSERT INTO qa_pairs (chunk_id, document_id, question, answer) 
+                        VALUES (%s, %s, %s, %s)
+                        ON DUPLICATE KEY UPDATE
+                            answer = IF(LENGTH(VALUES(answer)) > LENGTH(answer), VALUES(answer), answer),
+                            chunk_id = IF(LENGTH(VALUES(answer)) > LENGTH(answer), VALUES(chunk_id), chunk_id)
+                        """,
+                        (chunk_id, document_id, qa.get('question', ''), qa.get('answer', ''))
+                    )
+                conn.commit()
+            except Exception as e:
+                print(f"  - Warning: Failed to store QA pairs in database: {str(e)}")
+                conn.rollback()
+            finally:
+                cursor.close()
+                conn.close()
+        
+        # Update chunk status to completed
+        conn = db_utils.get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                "UPDATE document_chunks SET status = %s WHERE chunk_id = %s",
+                ("completed", chunk_id)
+            )
+            conn.commit()
+        except Exception as e:
+            print(f"  - Warning: Failed to update chunk status: {str(e)}")
+        finally:
+            cursor.close()
+            conn.close()
+        
+        # Print statistics
+        elapsed_time = time.time() - start_time
+        print(f"  - Found {len(concepts)} concepts and {len(qa_pairs)} Q&A pairs")
+        print(f"  - Processing time: {elapsed_time:.2f} seconds")
+        
+        # Return results for this chunk
+        return chunk_idx, concepts, qa_pairs
+    
+    except Exception as e:
+        print(f"  - Error in process_single_chunk: {str(e)}")
+        # Try to mark the chunk as failed if possible
+        try:
+            conn = db_utils.get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE document_chunks SET status = %s WHERE document_id = %s AND chunk_index = %s",
+                ("failed", document_id, chunk_idx)
+            )
+            conn.commit()
+            cursor.close()
+            conn.close()
+        except:
+            pass  # If this fails too, just continue
+            
         return chunk_idx, [], []
-    
-    # Update chunk status to processing
-    db_utils.update_chunk_status(chunk_id, "processing")
-    
-    # Get author name from document info
-    document_info = db_utils.get_document_info(document_id)
-    author_name = document_info['author'] if document_info else "Unknown Author"
-    
-    # Extract key concepts and Q&A pairs
-    result = extract_concepts_with_llm(chunk, api_key, author_name)
-    
-    # Extract concepts and Q&A pairs
-    concepts = result.get("key_concepts", [])
-    qa_pairs = result.get("qa_pairs", [])
-    
-    # Store concepts and QA pairs in the database
-    if concepts:
-        if not db_utils.store_concepts(chunk_id, document_id, concepts):
-            print(f"  - Warning: Failed to store concepts in database")
-    
-    if qa_pairs:
-        if not db_utils.store_qa_pairs(chunk_id, document_id, qa_pairs):
-            print(f"  - Warning: Failed to store QA pairs in database")
-    
-    # Update chunk status to completed
-    db_utils.update_chunk_status(chunk_id, "completed")
-    
-    # Print statistics
-    elapsed_time = time.time() - start_time
-    print(f"  - Found {len(concepts)} concepts and {len(qa_pairs)} Q&A pairs")
-    print(f"  - Processing time: {elapsed_time:.2f} seconds")
-    
-    # Return results for this chunk
-    return chunk_idx, concepts, qa_pairs
 
 # Process PDF text with LLM
 def process_pdf_with_llm(chunks: List[str], api_keys: List[str], document_id: int, batch_size: int = 1, resume: bool = True):
     """Process PDF text chunks with LLM to extract key concepts, Q&A pairs, and summary."""
-    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     import math
     
     # Initialize collections for storing results (for temporary use)
@@ -611,32 +740,59 @@ def process_pdf_with_llm(chunks: List[str], api_keys: List[str], document_id: in
     progress_bar = tqdm(total=len(chunks_to_process), desc="Processing chunks", unit="chunk")
     
     # Process chunks in appropriate batches
-    if batch_size > 1 and len(api_keys) > 1:
-        # Calculate effective batch size based on available API keys
-        effective_batch_size = min(batch_size, len(api_keys))
+    if batch_size > 1:
+        # Calculate effective batch size (no longer requiring multiple API keys)
+        effective_batch_size = min(batch_size, 10)  # Cap at 10 parallel threads to avoid overwhelming
         print(f"Using batch processing with {effective_batch_size} parallel requests")
         
         # Define a function for processing a single chunk (for ThreadPoolExecutor)
         def process_chunk(chunk_data):
             chunk_idx, chunk_text, key_idx = chunk_data
             api_key = api_keys[key_idx % len(api_keys)]
-            result = process_single_chunk(chunk_idx, chunk_text, api_key, document_id)
-            progress_bar.update(1)
-            return result
+            
+            # Use thread-local variable for retries
+            retries = 0
+            max_retries = 3
+            
+            while retries < max_retries:
+                try:
+                    result = process_single_chunk(chunk_idx, chunk_text, api_key, document_id)
+                    return result
+                except Exception as e:
+                    retries += 1
+                    if retries >= max_retries:
+                        print(f"\n  - Failed to process chunk {chunk_idx} after {max_retries} attempts: {str(e)}")
+                        # Return empty results
+                        return chunk_idx, [], []
+                    
+                    # Exponential backoff
+                    sleep_time = 2 ** retries + random.uniform(0, 1)
+                    print(f"\n  - Retrying chunk {chunk_idx} in {sleep_time:.2f}s ({retries}/{max_retries})")
+                    time.sleep(sleep_time)
         
         # Prepare chunks with API key indices
         chunk_data = [(chunk_indices[i], chunks_to_process[i], i % len(api_keys)) 
                      for i in range(len(chunks_to_process))]
         
-        # Process chunks in parallel using ThreadPoolExecutor
+        # Process chunks in parallel using ThreadPoolExecutor with as_completed
+        futures = []
+        chunk_results = []
+        
         with ThreadPoolExecutor(max_workers=effective_batch_size) as executor:
-            chunk_results = list(executor.map(process_chunk, chunk_data))
+            # Submit all tasks
+            for data in chunk_data:
+                futures.append(executor.submit(process_chunk, data))
             
-            # Aggregate results for summary generation
-            for chunk_idx, chunk_concepts, chunk_qa_pairs in chunk_results:
+            # Process results as they complete
+            for future in as_completed(futures):
+                result = future.result()
+                chunk_results.append(result)
+                progress_bar.update(1)  # Update progress bar as tasks complete
+                
+                # Aggregate results for summary generation
+                chunk_idx, chunk_concepts, chunk_qa_pairs = result
                 all_concepts.extend(chunk_concepts)
                 all_qa_pairs.extend(chunk_qa_pairs)
-                
     else:
         # Sequential processing
         print("Using sequential processing")
@@ -712,8 +868,8 @@ def parse_arguments():
     parser.add_argument("--pdf_path", type=str, help="Path to the PDF file")
     parser.add_argument("--chunk_size", type=int, default=1000, help="Number of words per chunk")
     parser.add_argument("--chunk_overlap", type=int, default=200, help="Number of overlapping words between chunks")
-    parser.add_argument("--batch_size", type=int, default=1, help="Number of chunks to process in parallel (requires multiple API keys)")
-    parser.add_argument("--api_keys_file", type=str, help="Path to file containing multiple API keys (one per line)")
+    parser.add_argument("--batch_size", type=int, default=3, help="Number of chunks to process in parallel (default: 3, set to 1 for sequential processing)")
+    parser.add_argument("--api_keys_file", type=str, help="Path to file containing multiple API keys (one per line, recommended for higher parallelism)")
     parser.add_argument("--init_db", action="store_true", help="Force recreate database tables")
     parser.add_argument("--title", type=str, help="Document title (default: filename)")
     parser.add_argument("--author", type=str, default="Iva Adamcová", help="Document author")
