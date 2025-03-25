@@ -98,7 +98,7 @@ def is_off_peak_time():
     return False
 
 # 3. Extract key concepts using LLM
-def extract_concepts_with_llm(chunk: str, api_key: str, author_name: str) -> Dict[str, Any]:
+def extract_concepts_with_llm(chunk: str, api_key: str, author_name: str, translate_to_english: bool = True) -> Dict[str, Any]:
     """Use LLM to extract key concepts, Q&A pairs, and summary from a text chunk."""
     global api_rate_limits, api_lock
     DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
@@ -133,21 +133,43 @@ def extract_concepts_with_llm(chunk: str, api_key: str, author_name: str) -> Dic
             # Add a note about the truncation
             chunk += "\n\n[... text truncated due to length limitations ...]"
     
-    system_prompt = f"""
-    Jsi asistent pro extrakci informací z přepsaného textu přednášky {author_name} (duchovní učitelky). Extrahuj pouze klíčové informace strukturovaně bez zbytečného textu.
-    
-    Při extrakci používej přímo jméno "{author_name}" místo obecných termínů jako "řečnice", "přednášející", "autorka" apod.
-    
-    Vrať odpověď POUZE jako JSON v následujícím formátu (bez kódu markdown nebo vysvětlení):
-    {{
-      "key_concepts": [
-        {{"concept": "Název konceptu", "explanation": "Vysvětlení konceptu (max 100 slov)"}}
-      ],
-      "qa_pairs": [
-        {{"question": "Otázka z textu", "answer": "Odpověď na otázku (max 80 slov)"}}
-      ]
-    }}
-    """
+    # Adjust system prompt based on translation setting
+    if translate_to_english:
+        system_prompt = f"""
+        You are an assistant for extracting information from the transcribed lecture text by {author_name} (spiritual teacher). Extract only key information in a structured format without unnecessary text.
+        
+        When extracting, use the name "{author_name}" directly instead of generic terms like "speaker", "lecturer", "author", etc.
+        
+        IMPORTANT: Translate ALL outputs to ENGLISH, including concepts, explanations, questions, and answers.
+        
+        Return your response ONLY as JSON in the following format (without markdown code or explanations):
+        {{
+          "key_concepts": [
+            {{"concept": "Concept name in English", "explanation": "Explanation in English (max 100 words)"}}
+          ],
+          "qa_pairs": [
+            {{"question": "Question from text in English", "answer": "Answer to the question in English (max 80 words)"}}
+          ]
+        }}
+        """
+    else:
+        system_prompt = f"""
+        You are an assistant for extracting information from the transcribed lecture text by {author_name} (spiritual teacher). Extract only key information in a structured format without unnecessary text.
+        
+        When extracting, use the name "{author_name}" directly instead of generic terms like "speaker", "lecturer", "author", etc.
+        
+        IMPORTANT: Respond in the SAME LANGUAGE as the input text. Do not translate the content.
+        
+        Return your response ONLY as JSON in the following format (without markdown code or explanations):
+        {{
+          "key_concepts": [
+            {{"concept": "Concept name", "explanation": "Explanation of the concept (max 100 words)"}}
+          ],
+          "qa_pairs": [
+            {{"question": "Question from text", "answer": "Answer to the question (max 80 words)"}}
+          ]
+        }}
+        """
     
     headers = {
         "Content-Type": "application/json",
@@ -161,7 +183,7 @@ def extract_concepts_with_llm(chunk: str, api_key: str, author_name: str) -> Dic
         "model": "deepseek-chat",  # Using deepseek-chat which has lower pricing
         "messages": [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Extrahuj klíčové informace z této části přednášky:\n\n{chunk}"}
+            {"role": "user", "content": f"Extract key information from this part of the lecture{' and translate it to English' if translate_to_english else ''}:\n\n{chunk}"}
         ],
         "temperature": 0.1,  # Lower temperature for more consistent results and potentially fewer tokens
         "max_tokens": max_output_tokens,
@@ -295,7 +317,7 @@ def extract_concepts_with_llm(chunk: str, api_key: str, author_name: str) -> Dic
                     
                     # Retry immediately with the same chunks
                     print("  - Retrying request after rate limit backoff...")
-                    return extract_concepts_with_llm(chunk, api_key, author_name)
+                    return extract_concepts_with_llm(chunk, api_key, author_name, translate_to_english)
                 
                 # Check for token limit errors
                 if "error" in error_details and "maximum context length" in error_details.get("error", {}).get("message", ""):
@@ -310,7 +332,7 @@ def extract_concepts_with_llm(chunk: str, api_key: str, author_name: str) -> Dic
                         shortened_chunk += "\n\n[... text truncated due to length limitations ...]"
                         
                         # Try again with the shortened chunk
-                        data["messages"][1]["content"] = f"Extrahuj klíčové informace z této části přednášky (text byl zkrácen):\n\n{shortened_chunk}"
+                        data["messages"][1]["content"] = f"Extract key information from this part of the lecture (text was shortened):\n\n{shortened_chunk}"
                         retry_response = requests.post(DEEPSEEK_API_URL, headers=headers, json=data)
                         
                         if retry_response.status_code == 200:
@@ -553,7 +575,7 @@ def create_summary_document(document_id: int, output_dir: str):
     
     return summary_path
 
-def process_single_chunk(chunk_idx: int, chunk: str, api_key: str, document_id: int) -> Tuple[int, List[Dict], List[Dict]]:
+def process_single_chunk(chunk_idx: int, chunk: str, api_key: str, document_id: int, translate_to_english: bool = False) -> Tuple[int, List[Dict], List[Dict]]:
     """Process a single chunk and store results in the database."""
     print(f"\nProcessing chunk {chunk_idx+1}...")
     start_time = time.time()
@@ -589,7 +611,7 @@ def process_single_chunk(chunk_idx: int, chunk: str, api_key: str, document_id: 
         author_name = document_info['author'] if document_info else "Unknown Author"
         
         # Extract key concepts and Q&A pairs
-        result = extract_concepts_with_llm(chunk, api_key, author_name)
+        result = extract_concepts_with_llm(chunk, api_key, author_name, translate_to_english)
         
         # Extract concepts and Q&A pairs
         concepts = result.get("key_concepts", [])
@@ -686,7 +708,7 @@ def process_single_chunk(chunk_idx: int, chunk: str, api_key: str, document_id: 
         return chunk_idx, [], []
 
 # Process PDF text with LLM
-def process_pdf_with_llm(chunks: List[str], api_keys: List[str], document_id: int, batch_size: int = 1, resume: bool = True):
+def process_pdf_with_llm(chunks: List[str], api_keys: List[str], document_id: int, batch_size: int = 1, resume: bool = True, translate_to_english: bool = True):
     """Process PDF text chunks with LLM to extract key concepts, Q&A pairs, and summary."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
     import math
@@ -705,7 +727,11 @@ def process_pdf_with_llm(chunks: List[str], api_keys: List[str], document_id: in
     author_name = document_info['author']
     
     print(f"Processing document: {document_info['filename']}")
-    
+    if translate_to_english:
+        print("Translation to English is enabled - output will be in English")
+    else:
+        print("Translation is disabled - output will be in the original language")
+        
     # Check for existing chunks and their status
     conn = db_utils.get_connection()
     cursor = conn.cursor(dictionary=True)
@@ -756,7 +782,7 @@ def process_pdf_with_llm(chunks: List[str], api_keys: List[str], document_id: in
             
             while retries < max_retries:
                 try:
-                    result = process_single_chunk(chunk_idx, chunk_text, api_key, document_id)
+                    result = process_single_chunk(chunk_idx, chunk_text, api_key, document_id, translate_to_english)
                     return result
                 except Exception as e:
                     retries += 1
@@ -801,7 +827,7 @@ def process_pdf_with_llm(chunks: List[str], api_keys: List[str], document_id: in
             api_key = api_keys[i % len(api_keys)]
             
             # Process each chunk
-            _, chunk_concepts, chunk_qa_pairs = process_single_chunk(chunk_indices[i], chunk, api_key, document_id)
+            _, chunk_concepts, chunk_qa_pairs = process_single_chunk(chunk_indices[i], chunk, api_key, document_id, translate_to_english)
             
             # Add chunk results to the collections for summary generation
             all_concepts.extend(chunk_concepts)
@@ -874,6 +900,7 @@ def parse_arguments():
     parser.add_argument("--title", type=str, help="Document title (default: filename)")
     parser.add_argument("--author", type=str, default="Iva Adamcová", help="Document author")
     parser.add_argument("--no_resume", action="store_true", help="Don't resume interrupted processing, start from beginning")
+    parser.add_argument("--no_translation", action="store_true", help="Do not translate concepts and QA pairs to English, keep them in the original language")
     
     # Database operations
     parser.add_argument("--document_id", type=int, help="Existing document ID to work with")
@@ -1215,8 +1242,8 @@ if __name__ == "__main__":
             db_utils.update_document_status(document_id, "failed")
             sys.exit(1)
         
-        # Process with LLM
-        process_pdf_with_llm(chunks, api_keys, document_id, batch_size=args.batch_size, resume=not args.no_resume)
+        # Process with LLM - invert the no_translation flag for translate_to_english
+        process_pdf_with_llm(chunks, api_keys, document_id, batch_size=args.batch_size, resume=not args.no_resume, translate_to_english=not args.no_translation)
         
         # No automatic JSON export - data is stored in database
         print("\nExtraction completed successfully!")

@@ -1,112 +1,188 @@
-# PDF Wisdom Extractor
+# PDF Wisdom Extractor and Vector Database Tool
 
-A tool for extracting concepts, questions, answers, and summaries from PDF lecture transcripts using LLMs and storing them in a MySQL database.
+This project consists of three main components:
 
-## Features
-
-- Extract text from PDF files
-- Process text with AI (DeepSeek, OpenAI, or Anthropic) to extract key concepts
-- Store extracted data in MySQL database
-- Generate concept visualizations
-- Create summarized documents
-- Track processing status and progress
-
-## Requirements
-
-- Python 3.7+
-- MySQL server
-- API key for at least one LLM provider (DeepSeek, OpenAI, or Anthropic)
+1. **PDF Wisdom Extractor** - Extracts concepts and Q&A pairs from PDF lecture transcripts
+2. **MySQL to Vector Database Converter** - Converts extracted data to vector embeddings for AI-powered search
+3. **Wisdom QA System** - Command-line interface for asking questions to the vector database
 
 ## Installation
 
-1. Clone the repository:
-   ```
-   git clone https://github.com/yourusername/pdf-wisdom-extractor.git
-   cd pdf-wisdom-extractor
-   ```
+### Prerequisites
 
+- Python 3.8+
+- MySQL database
+- [Pinecone](https://www.pinecone.io/) account for vector database
+
+### Setup
+
+1. Clone the repository
 2. Install dependencies:
-   ```
-   pip install -r requirements.txt
-   ```
 
-3. Configure your database and API keys:
-   
-   Create a `.env` file in the project root with the following content:
-   ```
-   # LLM API Key (at least one is required)
-   DEEPSEEK_API_KEY=your_deepseek_api_key_here
-   # OPENAI_API_KEY=your_openai_key_here
-   # ANTHROPIC_API_KEY=your_anthropic_key_here
-
-   # MySQL configuration
-   MYSQL_HOST=localhost
-   MYSQL_USER=yourusername
-   MYSQL_PASSWORD=yourpassword
-   MYSQL_DATABASE=pdf_wisdom
-
-   # Optional configuration
-   # MAX_TOKENS_PER_CHUNK=4000    # Maximum tokens per text chunk
-   # MODEL_NAME=deepseek-chat     # Model to use with DeepSeek
-   # LLM_PROVIDER=deepseek        # Provider to use (deepseek, openai, anthropic)
-   ```
-
-4. Initialize the database:
-   ```
-   python pdf_wisdom_extractor.py --init_db
-   ```
-
-## Usage
-
-### Process a PDF file
-
-```
-python pdf_wisdom_extractor.py --pdf_path path/to/your/document.pdf
+```bash
+pip install -r requirements.txt
 ```
 
-Additional options:
-- `--title "Document Title"` - Specify document title (default: filename)
-- `--author "Author Name"` - Specify document author (default: "Iva Adamcová")
-- `--chunk_size 1000` - Number of words per chunk
-- `--chunk_overlap 200` - Overlap between chunks
-- `--batch_size 5` - Process multiple chunks in parallel (requires multiple API keys)
-- `--api_keys_file keys.txt` - File with multiple API keys (one per line)
+3. Copy `.env.template` to `.env` and fill in your API keys and database configuration:
 
-### List all documents in the database
-
+```bash
+cp .env.template .env
+# Edit .env with your credentials
 ```
+
+## PDF Wisdom Extractor Usage
+
+The PDF Wisdom Extractor processes PDF lecture transcripts, extracts key concepts and Q&A pairs, and stores them in a MySQL database.
+
+### Basic Usage
+
+```bash
+python pdf_wisdom_extractor.py --pdf_path path/to/lecture.pdf
+```
+
+### Options
+
+- `--pdf_path`: Path to the PDF file to process
+- `--chunk_size`: Number of words per chunk (default: 1000)
+- `--chunk_overlap`: Number of overlapping words between chunks (default: 200)
+- `--batch_size`: Number of chunks to process in parallel (default: 3)
+- `--author`: Document author (default: "Iva Adamcová")
+- `--title`: Document title (default: filename)
+- `--translate_to_english`: Translate concepts and Q&A pairs to English
+- `--list_documents`: List all documents in the database
+- `--document_id ID`: Specify a document ID for operations
+- `--export_data`: Export data to JSON files
+- `--create_summary`: Create a summary document
+- `--create_visualization`: Create a concept visualization
+
+### Examples
+
+Process a PDF with translation to English:
+```bash
+python pdf_wisdom_extractor.py --pdf_path lectures/wisdom.pdf --translate_to_english
+```
+
+List processed documents:
+```bash
 python pdf_wisdom_extractor.py --list_documents
 ```
 
-### Create summary document for an existing document
-
-```
+Create a summary document:
+```bash
 python pdf_wisdom_extractor.py --document_id 1 --create_summary
 ```
 
-### Create visualization for an existing document
+## MySQL to Vector Database Converter
+
+This tool converts concepts and Q&A pairs from the MySQL database to vector embeddings stored in Pinecone for efficient semantic search.
+
+### Basic Usage
+
+```bash
+python mysql_to_vector.py
+```
+
+### Options
+
+- `--document_id ID`: Process only a specific document
+- `--model`: Sentence transformer model for embeddings (default: all-MiniLM-L6-v2)
+- `--index_name`: Name for the Pinecone index (default: wisdom-embeddings)
+- `--list_documents`: List all documents in the database
+
+### Examples
+
+Convert all documents to vectors:
+```bash
+python mysql_to_vector.py
+```
+
+Process a specific document:
+```bash
+python mysql_to_vector.py --document_id 1
+```
+
+List documents:
+```bash
+python mysql_to_vector.py --list_documents
+```
+
+## Wisdom QA System
+
+The Wisdom QA system provides a command-line interface for asking questions against your vector database. It uses DeepSeek to break down complex questions into sub-questions and concepts, then searches for relevant information in Pinecone.
+
+### Basic Usage
+
+Run the script with a question:
+```bash
+python wisdom_qa.py --question "What is the nature of reality according to Iva Adamcová?"
+```
+
+Or use interactive mode for continuous questioning:
+```bash
+python wisdom_qa.py --interactive
+```
+
+### Options
+
+- `--question`: The question to ask
+- `--model`: Embedding model to use (default: all-MiniLM-L6-v2)
+- `--index`: Pinecone index name (default: wisdom-embeddings)
+- `--top_k`: Number of results to retrieve per query (default: 10)
+- `--interactive`: Run in interactive mode
+
+### Examples
+
+Ask a specific question:
+```bash
+python wisdom_qa.py --question "What is the law of attraction?"
+```
+
+Use a specific index and more results:
+```bash
+python wisdom_qa.py --question "How can I achieve inner peace?" --index my-custom-index --top_k 20
+```
+
+Run in interactive mode:
+```bash
+python wisdom_qa.py --interactive
+```
+
+## Complete Workflow
+
+For a complete extraction-to-search workflow:
+
+1. Extract wisdom from PDF:
+```bash
+python pdf_wisdom_extractor.py --pdf_path lectures/wisdom.pdf --translate_to_english
+```
+
+2. Convert to vector database:
+```bash
+python mysql_to_vector.py
+```
+
+3. Ask questions using the QA system:
+```bash
+python wisdom_qa.py --interactive
+```
+
+## Required Packages
+
+Create a `requirements.txt` file with:
 
 ```
-python pdf_wisdom_extractor.py --document_id 1 --create_visualization
+PyPDF2>=3.0.0
+mysql-connector-python>=8.0.0
+python-dotenv>=0.20.0
+requests>=2.27.1
+tqdm>=4.64.0
+tiktoken>=0.4.0
+pinecone-client>=2.2.1
+torch>=1.13.0
+sentence-transformers>=2.2.2
+numpy>=1.23.0
 ```
-
-## Database Schema
-
-The application uses the following database tables:
-
-1. **documents** - Main document information
-2. **document_chunks** - Individual text chunks from documents
-3. **concepts** - Key concepts extracted from chunks
-4. **qa_pairs** - Question-answer pairs extracted from chunks
-5. **summaries** - Document summaries
-
-## Output Files
-
-When processing a document, the following files are generated:
-
-- `concept_visualization.html` - Interactive visualization of key concepts
-- `[filename]_summary.md` - Markdown summary of extracted concepts and Q&A pairs
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details. 
+MIT 
