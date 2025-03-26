@@ -8,26 +8,46 @@
     .message {
         max-width: 85%;
         padding: 12px 16px;
-        border-radius: 10px;
-        margin-bottom: 8px;
+        border-radius: 14px;
+        margin-bottom: 12px;
+        transition: all 0.3s ease;
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
+        transform-origin: left bottom;
+        animation: messageAppear 0.3s ease-out forwards;
+    }
+    
+    @keyframes messageAppear {
+        from {
+            opacity: 0;
+            transform: translateY(10px) scale(0.97);
+        }
+        to {
+            opacity: 1;
+            transform: translateY(0) scale(1);
+        }
     }
     
     .user-message {
         background-color: #e0f2fe;
         border: 1px solid #bae6fd;
         margin-left: auto;
+        border-bottom-right-radius: 4px;
+        transform-origin: right bottom;
+        background-image: linear-gradient(120deg, #e0f2fe, #dbeafe);
     }
     
     .bot-message {
         background-color: white;
         border: 1px solid #e2e8f0;
         margin-right: auto;
+        border-bottom-left-radius: 4px;
     }
     
     .dark .user-message {
         background-color: #1e40af;
         border: 1px solid #1e3a8a;
         color: #f1f5f9;
+        background-image: linear-gradient(120deg, #1e40af, #2563eb);
     }
     
     .dark .bot-message {
@@ -88,6 +108,7 @@
         align-items: center;
         justify-content: center;
         z-index: 1;
+        transition: all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
     }
     
     .dark .step-indicator {
@@ -102,24 +123,30 @@
     .step-indicator.processing {
         border-color: #0ea5e9;
         animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+        transform: scale(1.05);
+        box-shadow: 0 0 10px rgba(14, 165, 233, 0.4);
     }
     
     .step-indicator.completed {
         border-color: #10b981;
         background-color: #dcfce7;
+        transform: scale(1.1);
     }
     
     .dark .step-indicator.completed {
         background-color: #064e3b;
+        box-shadow: 0 0 8px rgba(16, 185, 129, 0.4);
     }
     
     .step-indicator.error {
         border-color: #ef4444;
         background-color: #fee2e2;
+        transform: scale(1.1);
     }
     
     .dark .step-indicator.error {
         background-color: #7f1d1d;
+        box-shadow: 0 0 8px rgba(239, 68, 68, 0.4);
     }
     
     .step-indicator.skipped {
@@ -129,12 +156,24 @@
     
     .dark .step-indicator.skipped {
         background-color: #78350f;
+        box-shadow: 0 0 8px rgba(245, 158, 11, 0.4);
     }
     
     /* Results card animations */
     .result-card {
         animation: slideIn 0.3s ease-out forwards;
         opacity: 0;
+        transition: transform 0.2s ease;
+        border-radius: 12px;
+    }
+    
+    .result-card:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
+    }
+    
+    .dark .result-card:hover {
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
     }
     
     @keyframes slideIn {
@@ -180,24 +219,34 @@
     /* Progress bar styles */
     .progress-container {
         width: 100%;
-        height: 4px;
+        height: 6px;
         background-color: #f1f5f9;
-        border-radius: 2px;
+        border-radius: 3px;
         overflow: hidden;
-        margin-top: 8px;
+        margin-top: 10px;
         position: relative;
+        box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.05);
     }
     
     .dark .progress-container {
         background-color: #1e293b;
+        box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.2);
     }
     
     .progress-bar {
         height: 100%;
         width: 0%;
         background: linear-gradient(90deg, #0ea5e9, #a855f7);
-        border-radius: 2px;
+        border-radius: 3px;
         transition: width 0.3s ease-out;
+        background-size: 200% 100%;
+        animation: gradientShift 3s ease infinite;
+    }
+    
+    @keyframes gradientShift {
+        0% { background-position: 0% 50%; }
+        50% { background-position: 100% 50%; }
+        100% { background-position: 0% 50%; }
     }
     
     /* Progress bar shine effect */
@@ -211,8 +260,8 @@
         background-image: linear-gradient(
             110deg, 
             rgba(255, 255, 255, 0) 0%, 
-            rgba(255, 255, 255, 0.3) 40%, 
-            rgba(255, 255, 255, 0.3) 60%, 
+            rgba(255, 255, 255, 0.5) 40%, 
+            rgba(255, 255, 255, 0.5) 60%, 
             rgba(255, 255, 255, 0) 100%
         );
         background-size: 200% 100%;
@@ -224,8 +273,8 @@
         background-image: linear-gradient(
             110deg, 
             rgba(255, 255, 255, 0) 0%, 
-            rgba(255, 255, 255, 0.1) 40%, 
-            rgba(255, 255, 255, 0.1) 60%, 
+            rgba(255, 255, 255, 0.2) 40%, 
+            rgba(255, 255, 255, 0.2) 60%, 
             rgba(255, 255, 255, 0) 100%
         );
     }
@@ -253,6 +302,143 @@
         opacity: 1;
         height: 1.5rem;
     }
+    
+    /* Tab styling enhancements */
+    .tab-button {
+        transition: all 0.2s ease;
+        position: relative;
+        overflow: hidden;
+    }
+    
+    .tab-button::after {
+        content: '';
+        position: absolute;
+        bottom: 0;
+        left: 50%;
+        width: 0;
+        height: 2px;
+        background: #0ea5e9;
+        transition: all 0.3s ease;
+        transform: translateX(-50%);
+    }
+    
+    .tab-button:hover::after {
+        width: 100%;
+    }
+    
+    /* Enhanced typing indicator */
+    .typing-indicator {
+        display: inline-flex;
+        align-items: center;
+        background-color: rgba(226, 232, 240, 0.3);
+        padding: 8px 12px;
+        border-radius: 16px;
+        margin: 4px 0;
+    }
+    
+    .dark .typing-indicator {
+        background-color: rgba(30, 41, 59, 0.3);
+    }
+    
+    .typing-indicator span {
+        height: 8px;
+        width: 8px;
+        background-color: #0ea5e9;
+        border-radius: 50%;
+        display: inline-block;
+        margin: 0 2px;
+        opacity: 0.6;
+    }
+    
+    .dark .typing-indicator span {
+        background-color: #38bdf8;
+    }
+    
+    .typing-indicator span:nth-child(1) {
+        animation: bounce 1s infinite 0.1s;
+    }
+    
+    .typing-indicator span:nth-child(2) {
+        animation: bounce 1s infinite 0.3s;
+    }
+    
+    .typing-indicator span:nth-child(3) {
+        animation: bounce 1s infinite 0.5s;
+    }
+    
+    @keyframes bounce {
+        0%, 80%, 100% { transform: translateY(0); }
+        40% { transform: translateY(-5px); }
+    }
+    
+    /* Floating animation for sidebar */
+    @keyframes floatingPanel {
+        0% { transform: translateY(0); }
+        50% { transform: translateY(-5px); }
+        100% { transform: translateY(0); }
+    }
+    
+    #visualization-container {
+        animation: floatingPanel 6s ease-in-out infinite;
+    }
+    
+    /* Chat input enhancements */
+    #question-input {
+        transition: all 0.3s ease;
+    }
+    
+    #question-input:focus {
+        transform: translateY(-1px);
+        box-shadow: 0 4px 12px rgba(14, 165, 233, 0.15);
+    }
+    
+    .dark #question-input:focus {
+        box-shadow: 0 4px 12px rgba(14, 165, 233, 0.1);
+    }
+    
+    /* Send button enhancements */
+    #question-form button {
+        transition: all 0.3s ease;
+        position: relative;
+        overflow: hidden;
+    }
+    
+    #question-form button:hover {
+        transform: translateY(-1px);
+    }
+    
+    #question-form button:active {
+        transform: translateY(1px);
+    }
+    
+    #question-form button::after {
+        content: '';
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        width: 5px;
+        height: 5px;
+        background: rgba(255, 255, 255, 0.5);
+        opacity: 0;
+        border-radius: 100%;
+        transform: scale(1, 1) translate(-50%);
+        transform-origin: 50% 50%;
+    }
+    
+    #question-form button:focus:not(:active)::after {
+        animation: ripple 0.6s ease-out;
+    }
+    
+    @keyframes ripple {
+        0% {
+            transform: scale(0, 0);
+            opacity: 0.5;
+        }
+        100% {
+            transform: scale(20, 20);
+            opacity: 0;
+        }
+    }
 </style>
 {% endblock %}
 
@@ -264,7 +450,7 @@
         <div class="p-4 border-b border-gray-200 dark:border-dark-100 bg-white dark:bg-dark-300 transition-colors">
             <div class="flex items-center justify-between">
                 <div class="flex items-center space-x-3">
-                    <div class="w-10 h-10 bg-primary-100 dark:bg-primary-900/30 text-primary-600 dark:text-primary-400 rounded-full flex items-center justify-center">
+                    <div class="w-10 h-10 bg-gradient-to-tr from-primary-500 to-primary-400 dark:from-primary-600 dark:to-primary-400 text-white rounded-full flex items-center justify-center shadow-md">
                         <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
                         </svg>
@@ -302,7 +488,7 @@
         <!-- Chat messages -->
         <div id="chat-messages" class="flex-1 overflow-y-auto p-4 space-y-4 bg-gray-50 dark:bg-dark-400 transition-colors">
             <!-- Welcome message -->
-            <div class="message bot-message slide-in">
+            <div class="message bot-message">
                 <p class="text-secondary-800 dark:text-gray-200">
                     Hello! I'm your Wisdom Assistant. I can help you find answers from your PDF knowledge base.
                     Ask me any question, and I'll search through your documents to find the most relevant information.
@@ -323,7 +509,7 @@
                 >
                 <button 
                     type="submit" 
-                    class="px-4 py-2 bg-primary-600 hover:bg-primary-700 dark:bg-primary-700 dark:hover:bg-primary-600 text-white rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 transition-colors"
+                    class="px-4 py-2 bg-gradient-to-r from-primary-500 to-primary-600 hover:from-primary-600 hover:to-primary-700 dark:from-primary-600 dark:to-primary-700 dark:hover:from-primary-500 dark:hover:to-primary-600 text-white rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 transition-colors shadow-md"
                 >
                     <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
                         <path fill-rule="evenodd" d="M10.293 3.293a1 1 0 011.414 0l6 6a1 1 0 010 1.414l-6 6a1 1 0 01-1.414-1.414L14.586 11H3a1 1 0 110-2h11.586l-4.293-4.293a1 1 0 010-1.414z" clip-rule="evenodd" />
@@ -336,7 +522,7 @@
     <!-- Visualization section -->
     <div id="visualization-container" class="lg:w-1/3 xl:w-2/5 flex flex-col bg-white dark:bg-dark-300 rounded-lg shadow-soft overflow-hidden border border-gray-200 dark:border-dark-100 hidden lg:flex transition-colors">
         <!-- Visualization header -->
-        <div class="p-4 border-b border-gray-200 dark:border-dark-100 bg-white dark:bg-dark-300 transition-colors">
+        <div class="p-4 border-b border-gray-200 dark:border-dark-100 bg-gradient-to-r from-white to-gray-50 dark:from-dark-300 dark:to-dark-400 transition-colors">
             <h2 class="text-lg font-medium text-secondary-900 dark:text-white transition-colors">Search Visualization</h2>
             <p class="text-sm text-secondary-500 dark:text-gray-400 transition-colors">See how the vector search works</p>
         </div>
@@ -365,7 +551,7 @@
             <div class="mt-4 space-y-4">
                 <!-- Process view (new) -->
                 <div id="view-process" class="tab-content">
-                    <div class="p-4 bg-gray-50 dark:bg-dark-400 rounded-lg transition-colors">
+                    <div class="p-4 bg-gray-50 dark:bg-dark-400 rounded-lg transition-colors shadow-sm">
                         <h3 class="font-medium text-secondary-900 dark:text-white mb-4 transition-colors">Processing Steps</h3>
                         <div id="process-steps" class="pl-4">
                             <!-- Process steps will be rendered here -->
@@ -378,16 +564,23 @@
                 
                 <!-- Decomposition view -->
                 <div id="view-decomposition" class="tab-content hidden">
-                    <div class="p-4 bg-gray-50 dark:bg-dark-400 rounded-lg transition-colors">
+                    <div class="p-4 bg-gray-50 dark:bg-dark-400 rounded-lg transition-colors shadow-sm">
                         <h3 class="font-medium text-secondary-900 dark:text-white mb-2 transition-colors">Sub-questions</h3>
                         <ul id="sub-questions-list" class="list-disc pl-5 text-sm text-secondary-700 dark:text-gray-300 mb-4 transition-colors">
                             <li>Sub-questions will appear here</li>
                         </ul>
                         
                         <h3 class="font-medium text-secondary-900 dark:text-white mb-2 transition-colors">Key Concepts</h3>
-                        <ul id="concepts-list" class="list-disc pl-5 text-sm text-secondary-700 dark:text-gray-300 transition-colors">
+                        <ul id="concepts-list" class="list-disc pl-5 text-sm text-secondary-700 dark:text-gray-300 mb-4 transition-colors">
                             <li>Key concepts will appear here</li>
                         </ul>
+                        
+                        <div id="body-parts-section" class="hidden">
+                            <h3 class="font-medium text-secondary-900 dark:text-white mb-2 transition-colors">Body Parts</h3>
+                            <ul id="body-parts-list" class="list-disc pl-5 text-sm text-secondary-700 dark:text-gray-300 transition-colors">
+                                <li>Body parts will appear here</li>
+                            </ul>
+                        </div>
                     </div>
                 </div>
                 
@@ -427,6 +620,8 @@
     const processSteps = document.getElementById('process-steps');
     const subQuestionsList = document.getElementById('sub-questions-list');
     const conceptsList = document.getElementById('concepts-list');
+    const bodyPartsSection = document.getElementById('body-parts-section');
+    const bodyPartsList = document.getElementById('body-parts-list');
     const searchResults = document.getElementById('search-results');
     const similarityChart = document.getElementById('similarity-chart');
     
@@ -477,7 +672,7 @@
     // Add a message to the chat
     function addMessage(content, isUser = false) {
         const messageElement = document.createElement('div');
-        messageElement.className = `message ${isUser ? 'user-message' : 'bot-message'} slide-in`;
+        messageElement.className = `message ${isUser ? 'user-message' : 'bot-message'}`;
         
         // For longer messages with markdown-like formatting
         if (!isUser && content.includes('\n')) {
@@ -501,7 +696,7 @@
     function addTypingIndicator() {
         const typingElement = document.createElement('div');
         typingElement.id = 'typing-indicator';
-        typingElement.className = 'message bot-message slide-in';
+        typingElement.className = 'message bot-message';
         typingElement.innerHTML = `
             <div class="typing-indicator">
                 <span></span>
@@ -612,7 +807,7 @@
         
         switch(stepId) {
             case 'language':
-                return `Detected: <strong>${details.language}</strong> (${Math.abs(details.confidence * 100).toFixed(1)}% confidence)`;
+                return `Detected: <strong>${details.language}</strong> (${(details.confidence * 100).toFixed(1)}% confidence)`;
             case 'translation':
                 if (details.reason) return `Reason: ${details.reason}`;
                 if (details.error) return `Error: ${details.error}`;
@@ -647,6 +842,7 @@
     // Connect to Server-Sent Events stream
     function connectToEventStream(sessionId) {
         const eventSource = new EventSource(`/api/progress-stream/${sessionId}`);
+        let resultProcessed = false; // Flag to track if a result has been processed
         
         // Handle connection open
         eventSource.onopen = function() {
@@ -658,54 +854,96 @@
             console.error('Event stream error:', error);
             eventSource.close();
             hideProcessingIndicator();
-            removeTypingIndicator();
-            addMessage('Sorry, there was an error processing your question. Please try again.');
+            if (!resultProcessed) {
+                removeTypingIndicator();
+                addMessage('Sorry, there was an error processing your question. Please try again.');
+            }
         };
         
         // Handle messages
         eventSource.onmessage = function(event) {
-            const data = JSON.parse(event.data);
-            console.log('Event received:', data);
-            
-            switch(data.event) {
-                case 'connected':
-                    // Connection established
-                    break;
-                    
-                case 'process_init':
-                    // Initialize process steps
-                    initProcessSteps(data.process_steps);
-                    break;
-                    
-                case 'step_update':
-                    // Update step status
-                    updateProcessStep(data.step_id, data.status, data.details);
-                    break;
-                    
-                case 'progress':
-                    // Update progress bar
-                    updateProgressBar(data.value);
-                    break;
-                    
-                case 'result':
-                    // Complete result data received
-                    processResult(data.data);
-                    break;
-                    
-                case 'error':
-                    // Error occurred
-                    hideProcessingIndicator();
+            try {
+                const data = JSON.parse(event.data);
+                console.log('Event received:', data);
+                
+                switch(data.event) {
+                    case 'connected':
+                        // Connection established
+                        console.log('Connection established event received');
+                        break;
+                        
+                    case 'process_init':
+                        // Initialize process steps
+                        console.log('Process init event received');
+                        initProcessSteps(data.process_steps);
+                        break;
+                        
+                    case 'step_update':
+                        // Update step status
+                        console.log('Step update event received for:', data.step_id);
+                        updateProcessStep(data.step_id, data.status, data.details);
+                        break;
+                        
+                    case 'progress':
+                        // Update progress bar
+                        console.log('Progress event received:', data.value);
+                        updateProgressBar(data.value);
+                        break;
+                        
+                    case 'result':
+                        // Complete result data received
+                        console.log('Result event received with data:', data.data);
+                        if (data.data) {
+                            console.log('Result data answer:', data.data.answer);
+                            console.log('Result data status:', data.data.status);
+                            processResult(data.data);
+                            resultProcessed = true; // Mark that we've processed a result
+                        } else {
+                            console.error('Result event received but data is missing or undefined');
+                            // Display error message if no data received
+                            removeTypingIndicator();
+                            addMessage('Sorry, I couldn\'t generate an answer based on the available information.');
+                            resultProcessed = true; // Mark as processed even though it was an error
+                        }
+                        break;
+                        
+                    case 'error':
+                        // Error occurred
+                        console.error('Error event received:', data.error);
+                        hideProcessingIndicator();
+                        if (!resultProcessed) {
+                            removeTypingIndicator();
+                            addMessage(`Sorry, an error occurred: ${data.error}`);
+                            resultProcessed = true; // Mark as processed since we displayed an error
+                        }
+                        eventSource.close();
+                        break;
+                        
+                    case 'complete':
+                    case 'end':
+                        // Stream ended
+                        console.log('Stream end/complete event received');
+                        eventSource.close();
+                        hideProcessingIndicator();
+                        
+                        // If we never got a result event but got a complete event, show an error
+                        if (!resultProcessed) {
+                            console.error('Stream ended without processing a result');
+                            removeTypingIndicator();
+                            addMessage('Sorry, I didn\'t receive a proper response. Please try again.');
+                            resultProcessed = true;
+                        }
+                        break;
+                }
+            } catch (error) {
+                console.error('Error parsing event data:', error, event.data);
+                hideProcessingIndicator();
+                if (!resultProcessed) {
                     removeTypingIndicator();
-                    addMessage(`Sorry, an error occurred: ${data.error}`);
-                    eventSource.close();
-                    break;
-                    
-                case 'complete':
-                case 'end':
-                    // Stream ended
-                    eventSource.close();
-                    hideProcessingIndicator();
-                    break;
+                    addMessage('Sorry, there was an error processing your question. Please try again.');
+                    resultProcessed = true;
+                }
+                eventSource.close();
             }
         };
         
@@ -714,12 +952,21 @@
     
     // Process final result data
     function processResult(data) {
-        // Add bot response
-        removeTypingIndicator();
-        addMessage(data.answer);
+        console.log('processResult called with data:', data);
         
-        // Update visualization
-        updateVisualization(data);
+        // Add bot response if we have an answer
+        if (data && data.answer) {
+            console.log('Adding answer to chat:', data.answer.substring(0, 50) + '...');
+            removeTypingIndicator();
+            addMessage(data.answer);
+            
+            // Update visualization
+            updateVisualization(data);
+        } else {
+            console.error('No answer in result data. Full data:', JSON.stringify(data));
+            removeTypingIndicator();
+            addMessage('Sorry, I couldn\'t generate an answer based on the available information.');
+        }
     }
     
     // Handle form submission
@@ -826,11 +1073,7 @@
             if (data.decomposition.concepts && data.decomposition.concepts.length > 0) {
                 data.decomposition.concepts.forEach(concept => {
                     const li = document.createElement('li');
-                    if (typeof concept === 'string') {
-                        li.textContent = concept;
-                    } else if (concept.name && concept.description) {
-                        li.innerHTML = `<strong>${concept.name}:</strong> ${concept.description}`;
-                    }
+                    li.textContent = concept;
                     li.className = 'text-sm text-secondary-700 dark:text-gray-300 mb-1 transition-colors';
                     conceptsList.appendChild(li);
                 });
@@ -839,6 +1082,20 @@
                 li.textContent = 'No key concepts identified';
                 li.className = 'text-sm text-secondary-500 dark:text-gray-400 transition-colors';
                 conceptsList.appendChild(li);
+            }
+            
+            // Update body parts
+            bodyPartsList.innerHTML = '';
+            if (data.decomposition.body_parts && data.decomposition.body_parts.length > 0) {
+                bodyPartsSection.classList.remove('hidden');
+                data.decomposition.body_parts.forEach(part => {
+                    const li = document.createElement('li');
+                    li.textContent = part;
+                    li.className = 'text-sm text-secondary-700 dark:text-gray-300 mb-1 transition-colors font-medium text-primary-600 dark:text-primary-400';
+                    bodyPartsList.appendChild(li);
+                });
+            } else {
+                bodyPartsSection.classList.add('hidden');
             }
         }
         
@@ -890,25 +1147,22 @@
                                     <span class="text-xs px-2 py-0.5 bg-blue-100 dark:bg-blue-900/30 text-blue-800 dark:text-blue-300 rounded-full transition-colors">${(result.score * 100).toFixed(1)}%</span>
                                 </div>
                                 <p class="text-secondary-700 dark:text-gray-300 transition-colors">${result.content}</p>
-                                <p class="text-xs text-secondary-500 dark:text-gray-400 mt-1 transition-colors">Source: ${result.source}</p>
                             `;
                         } else if (result.type === 'qa_pair' || result.type === 'question') {
                             content = `
                                 <div class="flex justify-between items-start mb-1">
                                     <span class="font-medium text-secondary-900 dark:text-white transition-colors">Q: ${result.label}</span>
-                                    <span class="text-xs px-2 py-0.5 bg-blue-100 dark:bg-blue-900/30 text-blue-800 dark:text-blue-300 rounded-full transition-colors">${(result.score * 100).toFixed(1)}%</span>
+                                    <span class="text-xs px-2 py-0.5 bg-purple-100 dark:bg-purple-900/30 text-purple-800 dark:text-purple-300 rounded-full transition-colors">${(result.score * 100).toFixed(1)}%</span>
                                 </div>
                                 <p class="text-secondary-700 dark:text-gray-300 transition-colors">A: ${result.content}</p>
-                                <p class="text-xs text-secondary-500 dark:text-gray-400 mt-1 transition-colors">Source: ${result.source}</p>
                             `;
                         } else {
                             content = `
                                 <div class="flex justify-between items-start mb-1">
                                     <span class="font-medium text-secondary-900 dark:text-white transition-colors">Text</span>
-                                    <span class="text-xs px-2 py-0.5 bg-blue-100 dark:bg-blue-900/30 text-blue-800 dark:text-blue-300 rounded-full transition-colors">${(result.score * 100).toFixed(1)}%</span>
+                                    <span class="text-xs px-2 py-0.5 bg-gray-100 dark:bg-gray-700 text-gray-800 dark:text-gray-300 rounded-full transition-colors">${(result.score * 100).toFixed(1)}%</span>
                                 </div>
                                 <p class="text-secondary-700 dark:text-gray-300 transition-colors">${result.content}</p>
-                                <p class="text-xs text-secondary-500 dark:text-gray-400 mt-1 transition-colors">Source: ${result.source}</p>
                             `;
                         }
                         
@@ -1001,7 +1255,7 @@
                 text: topResults.map(r => `${(r.similarity * 100).toFixed(1)}%`),
                 textposition: 'auto',
                 hoverinfo: 'text',
-                hovertext: topResults.map(r => `${r.label}<br>Type: ${r.type}<br>Source: ${r.source}<br>Similarity: ${(r.similarity * 100).toFixed(1)}%`)
+                hovertext: topResults.map(r => `${r.label}<br>Type: ${r.type}<br>Similarity: ${(r.similarity * 100).toFixed(1)}%`)
             }], chartLayout, {
                 responsive: true
             });

@@ -90,17 +90,78 @@ def initialize_services():
         return False
 
 def detect_language(text):
-    """Detect the language of the input text."""
+    """Detect the language of the input text using DeepSeek."""
     try:
-        lang, confidence = langid.classify(text)
-        return lang, confidence
+        api_key = os.getenv("DEEPSEEK_API_KEY")
+        if not api_key:
+            # Fallback to langid if DeepSeek API key is not available
+            lang, confidence = langid.classify(text)
+            # Fix absurd confidence values - normalize to 0-1 range
+            confidence = min(abs(confidence / 100), 0.99)
+            return lang, confidence
+        
+        # Use DeepSeek for language detection
+        system_prompt = """
+        You are a language detection expert. Given a text input, identify the language it's written in.
+        Respond with a JSON object containing:
+        1. "language_code": The ISO 639-1 two-letter language code (e.g., "en" for English, "fr" for French, etc.)
+        2. "confidence": A decimal value between 0 and 1 indicating your confidence level
+        3. "language_name": The full name of the language in English
+        
+        Format: {"language_code": "xx", "confidence": 0.95, "language_name": "Language Name"}
+        """
+        
+        # Use a short sample for detection (first 200 chars)
+        # Use short timeout (10s) and fewer tokens (300) for this simple task
+        response = query_deepseek(
+            text[:200], 
+            system_prompt, 
+            api_key,
+            max_tokens=300,
+            timeout=10,
+            retries=2,
+            task_type="language_detection"
+        )
+        
+        if "error" in response:
+            # Fallback to langid
+            lang, confidence = langid.classify(text)
+            # Fix absurd confidence values - normalize to 0-1 range
+            confidence = min(abs(confidence / 100), 0.99)
+            return lang, confidence
+        
+        try:
+            # Parse DeepSeek response
+            content = response["content"]
+            # Find JSON object in response
+            import re
+            import json
+            json_match = re.search(r'\{.*\}', content, re.DOTALL)
+            if json_match:
+                data = json.loads(json_match.group(0))
+                lang_code = data.get("language_code", "en")
+                confidence = float(data.get("confidence", 0.7))
+                return lang_code, confidence
+            else:
+                # Fallback to langid
+                lang, confidence = langid.classify(text)
+                # Fix absurd confidence values - normalize to 0-1 range
+                confidence = min(abs(confidence / 100), 0.99)
+                return lang, confidence
+        except Exception as e:
+            print(f"Error parsing DeepSeek language detection response: {e}")
+            # Fallback to langid
+            lang, confidence = langid.classify(text)
+            # Fix absurd confidence values - normalize to 0-1 range
+            confidence = min(abs(confidence / 100), 0.99)
+            return lang, confidence
     except Exception as e:
         print(f"Error detecting language: {e}")
-        return "en", 0.0  # Default to English
+        return "en", 0.8  # Default to English with moderate confidence
 
 def translate_text(text, target_lang="en", source_lang=None):
     """
-    Translate text using DeepSeek API.
+    Translate text using DeepSeek API with improved timeout handling.
     
     Args:
         text: Text to translate
@@ -118,7 +179,18 @@ def translate_text(text, target_lang="en", source_lang=None):
     
     system_prompt = f"You are a professional translator. Translate the user's text{source_lang_prompt} to {target_lang}. Return only the translated text without explanations or notes."
     
-    response = query_deepseek(text, system_prompt, api_key)
+    # Use improved parameters for better reliability
+    # - Increased timeout to handle longer texts
+    # - More retries for better reliability
+    response = query_deepseek(
+        text, 
+        system_prompt, 
+        api_key, 
+        max_tokens=1500,  # Increased for longer texts
+        timeout=60,       # Increased timeout for full text
+        retries=4,        # More retries
+        task_type="translation"
+    )
     
     if "error" in response:
         return {"error": response["error"]}
@@ -223,20 +295,20 @@ def process_question_async(question, session_id):
     """
     event_queue = progress_events.get(session_id)
     if not event_queue:
+        print(f"Error: No event queue found for session {session_id}")
         return
     
     try:
-        # Initialize process steps
+        # Initialize process steps - removing separate translation steps
         process_steps = [
             {"id": "language", "name": "Language Detection", "status": "pending", "details": None},
-            {"id": "translation", "name": "Translation", "status": "pending", "details": None},
-            {"id": "decomposition", "name": "Question Decomposition", "status": "pending", "details": None},
+            {"id": "decomposition", "name": "Question Analysis", "status": "pending", "details": None},
             {"id": "search", "name": "Vector Search", "status": "pending", "details": None},
-            {"id": "answer", "name": "Answer Generation", "status": "pending", "details": None},
-            {"id": "translation_back", "name": "Translation to User Language", "status": "pending", "details": None}
+            {"id": "answer", "name": "Answer Generation", "status": "pending", "details": None}
         ]
         
         # Send initial process steps
+        print(f"[Session {session_id}] Initializing process steps")
         event_queue.put({
             "event": "process_init",
             "process_steps": process_steps,
@@ -273,54 +345,18 @@ def process_question_async(question, session_id):
         current_progress += progress_increment
         event_queue.put({"event": "progress", "value": current_progress})
         
-        # Translate if not English
-        translated_question = question
-        event_queue.put({
-            "event": "step_update",
-            "step_id": "translation",
-            "status": "processing"
-        })
+        # Store the original question for reference
+        original_question = question
         
-        if lang != "en" and os.getenv("DEEPSEEK_API_KEY"):
-            translation_result = translate_text(question, "en", lang)
-            
-            if "error" not in translation_result:
-                translated_question = translation_result["translated_text"]
-                event_queue.put({
-                    "event": "step_update",
-                    "step_id": "translation",
-                    "status": "completed",
-                    "details": {
-                        "original": question, 
-                        "translated": translated_question
-                    }
-                })
-            else:
-                event_queue.put({
-                    "event": "step_update",
-                    "step_id": "translation",
-                    "status": "error",
-                    "details": {"error": translation_result["error"]}
-                })
-        else:
-            event_queue.put({
-                "event": "step_update",
-                "step_id": "translation",
-                "status": "skipped",
-                "details": {"reason": "Language is English or translation API not available"}
-            })
-        
-        current_progress += progress_increment
-        event_queue.put({"event": "progress", "value": current_progress})
-        
-        # Decompose the question
+        # Process question for decomposition (using original language)
         event_queue.put({
             "event": "step_update",
             "step_id": "decomposition",
             "status": "processing"
         })
         
-        decomposition = decompose_question(translated_question)
+        # Pass the original question for decomposition with language info
+        decomposition = decompose_question(question, language=lang)
         result_data["decomposition"] = decomposition
         
         event_queue.put({
@@ -332,11 +368,23 @@ def process_question_async(question, session_id):
         current_progress += progress_increment
         event_queue.put({"event": "progress", "value": current_progress})
         
-        # Prepare search queries
+        # Use translated question from decomposition if available
+        search_question = decomposition.get("translated_question", question)
+        if lang != "en" and search_question != question:
+            print(f"Using translated question from decomposition: {search_question}")
+        
+        # Prepare search queries - use translated question for search
         all_queries = []
-        all_queries.append(translated_question)  # The original question
+        all_queries.append(search_question)  # The translated question for better search
         all_queries.extend(decomposition["sub_questions"])
-        all_queries.extend([c for c in decomposition["concepts"] if isinstance(c, str)])
+        all_queries.extend(decomposition["concepts"])  # Now concepts are already simple strings
+        
+        # Add body parts to search queries if present
+        if "body_parts" in decomposition and decomposition["body_parts"]:
+            # Add specific body part queries
+            for part in decomposition["body_parts"]:
+                all_queries.append(part)  # Add the body part as a direct search term
+        
         all_queries.extend(decomposition["search_queries"])
         
         # Remove duplicates while preserving order
@@ -372,10 +420,12 @@ def process_question_async(question, session_id):
             "status": "processing"
         })
         
+        # Generate answer with the original question and include language info
         answer = generate_answer(
-            translated_question, 
+            original_question, 
             search_results,
-            ensure_relevance=True
+            ensure_relevance=True,
+            target_language=lang  # Pass target language to generate answer in user's language
         )
         result_data["answer"] = answer
         
@@ -388,41 +438,8 @@ def process_question_async(question, session_id):
         current_progress += progress_increment
         event_queue.put({"event": "progress", "value": current_progress})
         
-        # Translate answer back if needed
-        event_queue.put({
-            "event": "step_update",
-            "step_id": "translation_back",
-            "status": "processing" 
-        })
-        
-        if lang != "en" and os.getenv("DEEPSEEK_API_KEY"):
-            back_translation = translate_text(answer, lang, "en")
-            
-            if "error" not in back_translation:
-                answer = back_translation["translated_text"]
-                result_data["answer"] = answer
-                event_queue.put({
-                    "event": "step_update",
-                    "step_id": "translation_back",
-                    "status": "completed",
-                    "details": {"translated_to": lang}
-                })
-            else:
-                event_queue.put({
-                    "event": "step_update",
-                    "step_id": "translation_back",
-                    "status": "error",
-                    "details": {"error": back_translation["error"]}
-                })
-        else:
-            event_queue.put({
-                "event": "step_update",
-                "step_id": "translation_back",
-                "status": "skipped",
-                "details": {"reason": "Language is English or translation API not available"}
-            })
-        
-        current_progress = 100  # Set to 100% when complete
+        # Set to 100% when complete
+        current_progress = 100
         event_queue.put({"event": "progress", "value": current_progress})
         
         # Process search results for visualization
@@ -436,7 +453,7 @@ def process_question_async(question, session_id):
                 result_type = metadata.get("type", "unknown")
                 score = result["score"]
                 
-                result_data = {
+                result_item = {
                     "id": result["id"],
                     "score": score,
                     "type": result_type,
@@ -445,38 +462,69 @@ def process_question_async(question, session_id):
                 
                 # Add type-specific data
                 if result_type == "concept":
-                    result_data["label"] = metadata.get("concept", "Unknown")
-                    result_data["content"] = metadata.get("explanation", "No explanation")
+                    result_item["label"] = metadata.get("concept", "Unknown")
+                    result_item["content"] = metadata.get("explanation", "No explanation")
                 elif result_type in ["qa_pair", "question"]:
-                    result_data["label"] = metadata.get("question", "Unknown")
-                    result_data["content"] = metadata.get("answer", "No answer")
+                    result_item["label"] = metadata.get("question", "Unknown")
+                    result_item["content"] = metadata.get("answer", "No answer")
                 else:
-                    result_data["label"] = "Text"
-                    result_data["content"] = metadata.get("text", "No text")
+                    result_item["label"] = "Text"
+                    result_item["content"] = metadata.get("text", "No text")
                 
-                result_data["source"] = metadata.get("document_title", "Unknown")
-                query_results.append(result_data)
+                result_item["source"] = metadata.get("document_title", "Unknown")
+                query_results.append(result_item)
+            
+            # Add notice that query was translated if needed
+            display_query = query
+            if query == search_question and search_question != original_question:
+                display_query = f"{original_question} [Translated: {query}]"
+            elif lang != "en" and query in decomposition.get("sub_questions", []):
+                # This is a sub-question that was already translated by DeepSeek
+                display_query = f"{query} [Translated from {lang}]"
             
             viz_data.append({
-                "query": query,
+                "query": display_query,
                 "results": query_results
             })
         
+        # Update final result data
         result_data["visualization"] = viz_data
         result_data["status"] = "success"
         
-        # Send final result data
+        # For non-English queries, add a translation note
+        if lang != "en":
+            result_data["translation_note"] = f"Your question was translated from {lang} to English for processing."
+        
+        # Debug the result data before sending
+        print(f"[Session {session_id}] Sending result data. Answer present: {'Yes' if 'answer' in result_data else 'No'}")
+        if 'answer' in result_data:
+            print(f"[Session {session_id}] Answer length: {len(result_data['answer'])}")
+        else:
+            print(f"[Session {session_id}] WARNING: No answer in result_data")
+            # Add a fallback answer if none exists
+            result_data["answer"] = "I'm sorry, I couldn't generate an answer based on the available information."
+        
+        # Make sure visualization exists even if empty
+        if 'visualization' not in result_data:
+            result_data["visualization"] = []
+        
+        # Send result data event before completing the stream
+        print(f"[Session {session_id}] Putting result event in queue")
         event_queue.put({
             "event": "result",
             "data": result_data
         })
         
+        # Small delay to ensure the result event is processed before the stream ends
+        time.sleep(0.5)
+        
         # Signal end of stream
+        print(f"[Session {session_id}] Putting None in queue (end of stream)")
         event_queue.put(None)
         
     except Exception as e:
         error_traceback = traceback.format_exc()
-        print(f"Error in async processing: {str(e)}\n{error_traceback}")
+        print(f"Error in async processing for session {session_id}: {str(e)}\n{error_traceback}")
         
         # Send error event
         event_queue.put({

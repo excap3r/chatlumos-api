@@ -18,6 +18,7 @@ import numpy as np
 from dotenv import load_dotenv
 from tqdm import tqdm
 import textwrap
+import random
 
 # Import Pinecone
 try:
@@ -47,7 +48,9 @@ DEFAULT_TOP_K = 10                   # Default number of results to retrieve
 
 # ----------------- DeepSeek Integration -----------------
 
-def query_deepseek(prompt: str, system_prompt: str = None, api_key: str = None) -> Dict[str, Any]:
+def query_deepseek(prompt: str, system_prompt: str = None, api_key: str = None, 
+                  max_tokens: int = 2000, timeout: int = 30, 
+                  retries: int = 2, task_type: str = "general") -> Dict[str, Any]:
     """
     Query the DeepSeek API with a prompt.
     
@@ -55,6 +58,10 @@ def query_deepseek(prompt: str, system_prompt: str = None, api_key: str = None) 
         prompt: The user prompt to send
         system_prompt: Optional system prompt to set context
         api_key: DeepSeek API key (defaults to env var)
+        max_tokens: Maximum tokens to generate (default 2000)
+        timeout: Request timeout in seconds (default 30)
+        retries: Number of retry attempts (default 2)
+        task_type: Task type for optimal parameter settings ("general", "translation", etc.)
     
     Returns:
         Dictionary with response content or error
@@ -77,59 +84,160 @@ def query_deepseek(prompt: str, system_prompt: str = None, api_key: str = None) 
     
     messages.append({"role": "user", "content": prompt})
     
+    # Set task-specific parameters
+    if task_type == "translation":
+        # Use lower values for translation tasks
+        actual_max_tokens = min(max_tokens, 800)  # Cap at 800 for translations
+        temperature = 0.2  # Lower temperature for more accurate translations
+    else:
+        actual_max_tokens = max_tokens
+        temperature = 0.3  # Default temperature
+    
     data = {
         "model": "deepseek-chat",
         "messages": messages,
-        "temperature": 0.3,
-        "max_tokens": 2000
+        "temperature": temperature,
+        "max_tokens": actual_max_tokens
     }
     
-    try:
-        response = requests.post(DEEPSEEK_API_URL, headers=headers, json=data)
-        
-        if response.status_code == 200:
-            result = response.json()
-            content = result["choices"][0]["message"]["content"]
-            return {"content": content}
-        else:
+    # Initialize retry backoff
+    backoff = 1
+    attempts = 0
+    max_attempts = retries + 1  # Initial attempt + retries
+    
+    while attempts < max_attempts:
+        attempts += 1
+        try:
+            print(f"DeepSeek API call attempt {attempts}/{max_attempts} for {task_type} task...")
+            response = requests.post(
+                DEEPSEEK_API_URL, 
+                headers=headers, 
+                json=data, 
+                timeout=timeout  # Set timeout for the request
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                content = result["choices"][0]["message"]["content"]
+                return {"content": content}
+            elif response.status_code == 429:
+                # Rate limit error - always retry with backoff
+                print(f"DeepSeek API rate limit error (429). Backing off for {backoff} seconds...")
+                time.sleep(backoff)
+                backoff *= 2  # Exponential backoff
+                continue
+            else:
+                error_msg = f"API request failed with status {response.status_code}"
+                try:
+                    error_details = response.json()
+                    error_msg += f": {error_details}"
+                except:
+                    error_msg += f": {response.text}"
+                
+                print(f"DeepSeek API error: {error_msg}")
+                
+                # Only retry server errors (5xx)
+                if response.status_code >= 500 and attempts < max_attempts:
+                    print(f"Retrying in {backoff} seconds...")
+                    time.sleep(backoff)
+                    backoff *= 2  # Exponential backoff
+                    continue
+                
+                return {
+                    "error": error_msg,
+                    "details": response.text
+                }
+        except requests.exceptions.Timeout:
+            if attempts < max_attempts:
+                print(f"DeepSeek API timeout after {timeout} seconds. Retrying in {backoff} seconds...")
+                time.sleep(backoff)
+                backoff *= 2  # Exponential backoff
+                continue
             return {
-                "error": f"API request failed with status {response.status_code}",
-                "details": response.text
+                "error": f"API request timed out after {timeout} seconds",
+                "details": f"Request timed out after {attempts} attempts"
             }
-    except Exception as e:
-        return {
-            "error": f"Exception during API request: {str(e)}",
-            "details": str(e)
-        }
+        except Exception as e:
+            if attempts < max_attempts:
+                print(f"DeepSeek API exception: {str(e)}. Retrying in {backoff} seconds...")
+                time.sleep(backoff)
+                backoff *= 2  # Exponential backoff
+                continue
+            return {
+                "error": f"Exception during API request: {str(e)}",
+                "details": str(e)
+            }
+    
+    # If we get here, all retries failed
+    return {
+        "error": f"Failed after {max_attempts} attempts",
+        "details": "Exceeded maximum retry attempts"
+    }
 
-def decompose_question(question: str, api_key: str = None) -> Dict[str, Any]:
+def decompose_question(question: str, api_key: str = None, language: str = "en") -> Dict[str, Any]:
     """
     Decompose a complex question into sub-questions and concepts using DeepSeek.
     
     Args:
         question: The main question to decompose
         api_key: DeepSeek API key (optional)
+        language: The language code of the question (default: "en")
     
     Returns:
         Dictionary with sub-questions, concepts, and analysis
     """
-    system_prompt = """
-    You are an expert question decomposer. Your task is to break down complex questions into:
-    1. A set of simpler sub-questions that together would help answer the main question
-    2. Key concepts mentioned in the question that would be important to understand
+    # Add translation instructions if not in English
+    translation_instruction = ""
+    if language != "en":
+        translation_instruction = """
+        IMPORTANT: The question is not in English. Your first task is to translate it to English. 
+        Include the translated question in your response using the key "translated_question". 
+        Then decompose the TRANSLATED version of the question.
+        """
+    
+    system_prompt = f"""
+    You are an expert spiritual knowledge question decomposer. Your task is to break down complex spiritual questions into:
+    1. A set of simpler sub-questions that together would help answer the main spiritual question
+    2. Key spiritual concepts mentioned in the question that would be important to understand
+    
+    {translation_instruction}
     
     Return your analysis as a structured JSON with:
-    - sub_questions: Array of simpler questions (3-5 items)
-    - concepts: Array of key concepts with brief descriptions (2-4 items)
-    - search_queries: Array of effective search queries for a vector database (3-5 items)
-    - analysis: Brief analysis of what knowledge is needed to answer this question
+    - sub_questions: Array of simpler questions (3-5 items) focused on spiritual aspects of the query
+    - concepts: Array of SIMPLE CONCEPT STRINGS with no descriptions (3-5 items). JUST PLAIN TERMS like "karma", "meditation", "energy healing" - NOT objects or dictionaries with explanations.
+    - search_queries: Array of effective search queries for a vector database of spiritual teachings (3-7 items)
+    - body_parts: Array of any specific body parts mentioned in the question (e.g., "legs", "heart", "left leg", "right knee")
+    - analysis: Brief analysis of what spiritual knowledge is needed to answer this question
+    - translated_question: The English translation of the question (ONLY include this if the original question is not in English)
     
-    Be precise and focused on extracting information that would help retrieve relevant knowledge from a vector database.
+    When generating your response consider the following concepts:
+    - 5D
+    - Consciousness
+    - Hermeticism
+    - Oneness
+    
+    For spiritual concepts, FOCUS ON EXTRACTING SHORT KEYWORD PHRASES that would be good for searching, NOT detailed explanations.
+    Each concept should be a single string of 1-4 words maximum, focused on core spiritual principles, practices, or ideas.
+    
+    IMPORTANT: If the question mentions specific body parts or physical symptoms, ALWAYS include those exact terms in both the concepts list AND as specific search queries. For example, if someone asks about "left leg pain", make sure "left leg" is included in concepts and create search queries like "left leg spiritual meaning" and "left leg energy".
+    
+    IMPORTANT FOR NON-ENGLISH QUESTIONS: If translating from another language, ALSO include any body parts, symptoms or key concepts in English. For example, if someone asks about "bolest v levé noze" in Czech, include "left leg", "leg pain", etc. in English in your concepts and search queries.
+    
+    Be precise and focused on extracting information that would help retrieve relevant spiritual knowledge from a vector database containing wisdom teachings.
     """
     
-    prompt = f"Decompose this question for semantic search:\n\n{question}"
+    prompt = f"Decompose this spiritual question for semantic search:\n\n{question}"
     
-    response = query_deepseek(prompt, system_prompt, api_key)
+    # Use a longer timeout (45s) for this more complex cognitive task
+    response = query_deepseek(
+        prompt, 
+        system_prompt, 
+        api_key, 
+        max_tokens=2000,
+        timeout=45,
+        retries=2,
+        task_type="decomposition"
+    )
     
     if "error" in response:
         print(f"Error with DeepSeek: {response['error']}")
@@ -137,7 +245,9 @@ def decompose_question(question: str, api_key: str = None) -> Dict[str, Any]:
             "sub_questions": [],
             "concepts": [],
             "search_queries": [],
-            "analysis": f"Failed to decompose question: {response.get('error', 'Unknown error')}"
+            "body_parts": [],
+            "analysis": f"Failed to decompose question: {response.get('error', 'Unknown error')}",
+            "translated_question": question  # Default to original
         }
     
     content = response["content"]
@@ -154,9 +264,52 @@ def decompose_question(question: str, api_key: str = None) -> Dict[str, Any]:
             data = json.loads(content)
         
         # Ensure all expected keys exist
-        for key in ["sub_questions", "concepts", "search_queries", "analysis"]:
+        for key in ["sub_questions", "concepts", "search_queries", "body_parts", "analysis"]:
             if key not in data:
                 data[key] = []
+        
+        # If translated_question is not in data and language is not English, 
+        # try to extract it with regex as a fallback
+        if language != "en" and "translated_question" not in data:
+            translation_match = re.search(r'translated_question["\s:]+([^"]+)', content)
+            if translation_match:
+                data["translated_question"] = translation_match.group(1).strip()
+            else:
+                # If still no translation found, use original question
+                data["translated_question"] = question
+        elif language == "en":
+            # For English questions, the translated question is the same as the original
+            data["translated_question"] = question
+        
+        # Convert any complex concept objects to simple strings if needed
+        if "concepts" in data:
+            simple_concepts = []
+            for concept in data["concepts"]:
+                if isinstance(concept, dict) and "name" in concept:
+                    simple_concepts.append(concept["name"])
+                elif isinstance(concept, str):
+                    simple_concepts.append(concept)
+            data["concepts"] = simple_concepts
+            
+        # If body parts were identified, add them to concepts and search queries
+        if "body_parts" in data and data["body_parts"]:
+            # Add body parts to concepts if not already there
+            for part in data["body_parts"]:
+                if part.lower() not in [c.lower() for c in data["concepts"]]:
+                    data["concepts"].append(part)
+                    
+            # Add specific body part search queries
+            for part in data["body_parts"]:
+                spiritual_queries = [
+                    f"{part} spiritual meaning",
+                    f"{part} energy",
+                    f"{part} symbolism"
+                ]
+                
+                # Add these to search queries if not similar to existing ones
+                for query in spiritual_queries:
+                    if not any(q.lower() in query.lower() or query.lower() in q.lower() for q in data["search_queries"]):
+                        data["search_queries"].append(query)
                 
         return data
     except Exception as e:
@@ -166,7 +319,9 @@ def decompose_question(question: str, api_key: str = None) -> Dict[str, Any]:
             "sub_questions": [],
             "concepts": [],
             "search_queries": [],
-            "analysis": "Failed to parse question decomposition"
+            "body_parts": [],
+            "analysis": "Failed to parse question decomposition",
+            "translated_question": question  # Default to original
         }
 
 # ----------------- Vector Database Functions -----------------
@@ -283,7 +438,7 @@ def batch_search_pinecone(queries: List[str], index_name: str = DEFAULT_INDEX, t
 
 # ----------------- Answer Generation -----------------
 
-def generate_answer(question: str, retrieved_data: Dict[str, List[Dict]], api_key: str = None, ensure_relevance: bool = False) -> str:
+def generate_answer(question: str, retrieved_data: Dict[str, List[Dict]], api_key: str = None, ensure_relevance: bool = False, target_language: str = "en") -> str:
     """
     Generate an answer based on retrieved data.
     
@@ -292,6 +447,7 @@ def generate_answer(question: str, retrieved_data: Dict[str, List[Dict]], api_ke
         retrieved_data: Dictionary of search queries and their results
         api_key: DeepSeek API key (optional)
         ensure_relevance: If True, emphasize strict relevance to the user's specific question
+        target_language: Language code to generate the answer in (default: "en")
         
     Returns:
         Generated answer
@@ -338,7 +494,14 @@ def generate_answer(question: str, retrieved_data: Dict[str, List[Dict]], api_ke
     
     # If there's no context, handle gracefully
     if not full_context:
-        return "I don't have enough information to answer this question based on the available knowledge."
+        no_info_message = "I don't have enough information to answer this question based on the available knowledge."
+        if target_language != "en":
+            # Translate the message to target language
+            system_prompt = f"You are a professional translator. Translate the text to {target_language}. Return only the translated text."
+            response = query_deepseek(no_info_message, system_prompt, api_key, max_tokens=200, timeout=10)
+            if "content" in response:
+                return response["content"]
+        return no_info_message
     
     # Create the system prompt
     relevance_instructions = ""
@@ -350,32 +513,58 @@ def generate_answer(question: str, retrieved_data: Dict[str, List[Dict]], api_ke
     11. Focus on providing a precise answer to exactly what was asked, nothing more
     """
     
+    # Add translation instruction if needed
+    translation_instruction = ""
+    if target_language != "en":
+        translation_instruction = f"\n12. IMPORTANT: Your final answer must be in {target_language}. First understand the question and formulate your answer in English, then translate the final answer to {target_language}."
+    
+    # Original user question to help with personalization
+    original_question_instruction = f"\nThe original user question is: '{question}'. Use this to make your response more personalized."
+    
     system_prompt = f"""
-    You are a knowledgeable assistant that answers questions based ONLY on the provided context information.
+    You are a knowledgeable and compassionate advisor who helps answer people's questions based on spiritual teachings.
+    
     Follow these guidelines:
-    1. Only use information explicitly stated in the context
-    2. If the context doesn't contain enough information to answer the question completely, state that clearly
-    3. Cite sources of information from the context where appropriate
-    4. Do not introduce information beyond what's provided in the context
-    5. Answer in a clear, concise, and well-structured format
-    6. Make responses personal and friendly, avoiding technical language when possible
-    7. DO NOT include any meta-instructions or notes about how to structure your response in your final answer{relevance_instructions}
+    1. Use the information in the provided context to inform your answer, but don't mention or reference the context directly
+    2. If the context doesn't contain enough information, make a reasonable guess based on spiritual principles
+    3. DO NOT cite sources or mention where the information comes from
+    4. Create a personalized, direct answer as if you're speaking directly to the person
+    5. Keep responses personal, compassionate and focused on helping the individual
+    6. DO NOT include any meta-instructions or notes about how to structure your response
+    7. NEVER say phrases like "Based on the information provided" or "According to the context"{relevance_instructions}{translation_instruction}
+    
+    Your answer should feel like it comes from your own wisdom and compassion, not from external sources.{original_question_instruction}
     """
     
     # Create the user prompt
     user_prompt = f"""
     Question: {question}
     
-    Please answer using ONLY the following context information:
+    Please answer using ONLY the following reference information (but don't mention this information directly):
     
     {full_context}
     """
     
-    # Query the LLM for an answer
-    response = query_deepseek(user_prompt, system_prompt, api_key)
+    # Query the LLM for an answer with appropriate parameters for a complete answer
+    response = query_deepseek(
+        user_prompt, 
+        system_prompt, 
+        api_key,
+        max_tokens=2000,  # Keep max_tokens high for comprehensive answers
+        timeout=60,       # Use longer timeout for this complex task
+        retries=2,        # Two retries are reasonable here
+        task_type="answer_generation"
+    )
     
     if "error" in response:
-        return f"Error generating answer: {response['error']}"
+        error_msg = f"Error generating answer: {response['error']}"
+        if target_language != "en":
+            # Translate the error message
+            system_prompt = f"You are a professional translator. Translate the text to {target_language}. Return only the translated text."
+            error_response = query_deepseek(error_msg, system_prompt, api_key, max_tokens=200, timeout=10)
+            if "content" in error_response:
+                return error_response["content"]
+        return error_msg
     
     # Clean up the response to remove any meta-instructions
     content = response["content"]
@@ -387,6 +576,9 @@ def generate_answer(question: str, retrieved_data: Dict[str, List[Dict]], api_ke
         "use that information as knowledge base",
         "Based on the provided context",
         "According to the context provided",
+        "According to the information",
+        "Based on the information given",
+        "From the information provided"
     ]
     
     # Check if any instruction patterns are at the end of the response
@@ -445,7 +637,7 @@ def interactive_mode():
             all_queries = []
             all_queries.append(question)  # The original question
             all_queries.extend(decomposition["sub_questions"])
-            all_queries.extend([c for c in decomposition["concepts"] if isinstance(c, str)])
+            all_queries.extend(decomposition["concepts"])
             all_queries.extend(decomposition["search_queries"])
             
             # Remove duplicates while preserving order
@@ -532,10 +724,7 @@ def main():
         if decomposition["concepts"]:
             print("\nKey concepts:")
             for concept in decomposition["concepts"]:
-                if isinstance(concept, dict) and "name" in concept and "description" in concept:
-                    print(f"  - {concept['name']}: {concept['description']}")
-                elif isinstance(concept, str):
-                    print(f"  - {concept}")
+                print(f"  - {concept}")
         
         # Search for information
         print("\n--- Searching for Information ---")
@@ -544,7 +733,7 @@ def main():
         all_queries = []
         all_queries.append(args.question)  # The original question
         all_queries.extend(decomposition["sub_questions"])
-        all_queries.extend([c for c in decomposition["concepts"] if isinstance(c, str)])
+        all_queries.extend(decomposition["concepts"])
         all_queries.extend(decomposition["search_queries"])
         
         # Remove duplicates while preserving order
