@@ -174,21 +174,32 @@ def query_deepseek(prompt: str, system_prompt: str = None, api_key: str = None,
         "details": "Exceeded maximum retry attempts"
     }
 
-def decompose_question(question: str, api_key: str = None, language: str = "en") -> Dict[str, Any]:
+def decompose_question(question: str, api_key: str = None, language: str = "") -> Dict[str, Any]:
     """
     Decompose a complex question into sub-questions and concepts using DeepSeek.
     
     Args:
         question: The main question to decompose
         api_key: DeepSeek API key (optional)
-        language: The language code of the question (default: "en")
+        language: The language code of the question (default: "", which means auto-detect)
     
     Returns:
-        Dictionary with sub-questions, concepts, and analysis
+        Dictionary with sub-questions, concepts, analysis, and language information
     """
-    # Add translation instructions if not in English
+    # Add translation instructions if language is not specified (auto-detect)
     translation_instruction = ""
-    if language != "en":
+    if not language:
+        translation_instruction = """
+        IMPORTANT: First identify the language of the question and include it in your response using the key "detected_language".
+        Use the ISO 639-1 two-letter language code (e.g., "en" for English, "cs" for Czech).
+        
+        If the question is not in English, translate it to English and include the translation using the key "translated_question".
+        Then decompose the TRANSLATED version of the question.
+        
+        If the question is in English, set "detected_language" to "en" and "translated_question" to the original question.
+        """
+    elif language != "en":
+        # Language is specified and not English
         translation_instruction = """
         IMPORTANT: The question is not in English. Your first task is to translate it to English. 
         Include the translated question in your response using the key "translated_question". 
@@ -208,7 +219,8 @@ def decompose_question(question: str, api_key: str = None, language: str = "en")
     - search_queries: Array of effective search queries for a vector database of spiritual teachings (3-7 items)
     - body_parts: Array of any specific body parts mentioned in the question (e.g., "legs", "heart", "left leg", "right knee")
     - analysis: Brief analysis of what spiritual knowledge is needed to answer this question
-    - translated_question: The English translation of the question (ONLY include this if the original question is not in English)
+    - translated_question: The English translation of the question (if not already in English)
+    - detected_language: The detected ISO language code for this question (e.g., "en", "cs", "de")
     
     When generating your response consider the following concepts:
     - 5D
@@ -247,7 +259,8 @@ def decompose_question(question: str, api_key: str = None, language: str = "en")
             "search_queries": [],
             "body_parts": [],
             "analysis": f"Failed to decompose question: {response.get('error', 'Unknown error')}",
-            "translated_question": question  # Default to original
+            "translated_question": question,  # Default to original
+            "detected_language": language if language else "en"  # Default to specified language or English
         }
     
     content = response["content"]
@@ -268,18 +281,24 @@ def decompose_question(question: str, api_key: str = None, language: str = "en")
             if key not in data:
                 data[key] = []
         
-        # If translated_question is not in data and language is not English, 
-        # try to extract it with regex as a fallback
-        if language != "en" and "translated_question" not in data:
-            translation_match = re.search(r'translated_question["\s:]+([^"]+)', content)
-            if translation_match:
-                data["translated_question"] = translation_match.group(1).strip()
-            else:
-                # If still no translation found, use original question
+        # Ensure language fields exist
+        if "detected_language" not in data:
+            # If specified, use that, otherwise default to English
+            data["detected_language"] = language if language else "en"
+            
+        # If no translation but needed, use original
+        if "translated_question" not in data:
+            # For English or if language matches detected language, use original question
+            if data["detected_language"] == "en" or data["detected_language"] == language:
                 data["translated_question"] = question
-        elif language == "en":
-            # For English questions, the translated question is the same as the original
-            data["translated_question"] = question
+            else:
+                # Try to extract translation from content if it exists
+                translation_match = re.search(r'translated_question["\s:]+([^"]+)', content)
+                if translation_match:
+                    data["translated_question"] = translation_match.group(1).strip()
+                else:
+                    # If all else fails, use original question
+                    data["translated_question"] = question
         
         # Convert any complex concept objects to simple strings if needed
         if "concepts" in data:
@@ -321,7 +340,8 @@ def decompose_question(question: str, api_key: str = None, language: str = "en")
             "search_queries": [],
             "body_parts": [],
             "analysis": "Failed to parse question decomposition",
-            "translated_question": question  # Default to original
+            "translated_question": question,  # Default to original
+            "detected_language": language if language else "en"  # Default to specified language or English
         }
 
 # ----------------- Vector Database Functions -----------------

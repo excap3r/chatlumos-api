@@ -8,7 +8,6 @@ visualizing vector database searches, and displaying answers in a clean UI.
 
 import os
 import traceback
-import langid
 import time
 import json
 import uuid
@@ -88,76 +87,6 @@ def initialize_services():
     except Exception as e:
         initialization_error = f"Unexpected error during initialization: {str(e)}"
         return False
-
-def detect_language(text):
-    """Detect the language of the input text using DeepSeek."""
-    try:
-        api_key = os.getenv("DEEPSEEK_API_KEY")
-        if not api_key:
-            # Fallback to langid if DeepSeek API key is not available
-            lang, confidence = langid.classify(text)
-            # Fix absurd confidence values - normalize to 0-1 range
-            confidence = min(abs(confidence / 100), 0.99)
-            return lang, confidence
-        
-        # Use DeepSeek for language detection
-        system_prompt = """
-        You are a language detection expert. Given a text input, identify the language it's written in.
-        Respond with a JSON object containing:
-        1. "language_code": The ISO 639-1 two-letter language code (e.g., "en" for English, "fr" for French, etc.)
-        2. "confidence": A decimal value between 0 and 1 indicating your confidence level
-        3. "language_name": The full name of the language in English
-        
-        Format: {"language_code": "xx", "confidence": 0.95, "language_name": "Language Name"}
-        """
-        
-        # Use a short sample for detection (first 200 chars)
-        # Use short timeout (10s) and fewer tokens (300) for this simple task
-        response = query_deepseek(
-            text[:200], 
-            system_prompt, 
-            api_key,
-            max_tokens=300,
-            timeout=10,
-            retries=2,
-            task_type="language_detection"
-        )
-        
-        if "error" in response:
-            # Fallback to langid
-            lang, confidence = langid.classify(text)
-            # Fix absurd confidence values - normalize to 0-1 range
-            confidence = min(abs(confidence / 100), 0.99)
-            return lang, confidence
-        
-        try:
-            # Parse DeepSeek response
-            content = response["content"]
-            # Find JSON object in response
-            import re
-            import json
-            json_match = re.search(r'\{.*\}', content, re.DOTALL)
-            if json_match:
-                data = json.loads(json_match.group(0))
-                lang_code = data.get("language_code", "en")
-                confidence = float(data.get("confidence", 0.7))
-                return lang_code, confidence
-            else:
-                # Fallback to langid
-                lang, confidence = langid.classify(text)
-                # Fix absurd confidence values - normalize to 0-1 range
-                confidence = min(abs(confidence / 100), 0.99)
-                return lang, confidence
-        except Exception as e:
-            print(f"Error parsing DeepSeek language detection response: {e}")
-            # Fallback to langid
-            lang, confidence = langid.classify(text)
-            # Fix absurd confidence values - normalize to 0-1 range
-            confidence = min(abs(confidence / 100), 0.99)
-            return lang, confidence
-    except Exception as e:
-        print(f"Error detecting language: {e}")
-        return "en", 0.8  # Default to English with moderate confidence
 
 def translate_text(text, target_lang="en", source_lang=None):
     """
@@ -299,10 +228,9 @@ def process_question_async(question, session_id):
         return
     
     try:
-        # Initialize process steps - removing separate translation steps
+        # Initialize process steps - removing language detection and separate translation steps
         process_steps = [
-            {"id": "language", "name": "Language Detection", "status": "pending", "details": None},
-            {"id": "decomposition", "name": "Question Analysis", "status": "pending", "details": None},
+            {"id": "decomposition", "name": "Question Analysis & Translation", "status": "pending", "details": None},
             {"id": "search", "name": "Vector Search", "status": "pending", "details": None},
             {"id": "answer", "name": "Answer Generation", "status": "pending", "details": None}
         ]
@@ -321,43 +249,31 @@ def process_question_async(question, session_id):
         
         # Track result data
         result_data = {
-            "status": "processing",
-            "original_language": "en"
-        }
-        
-        # Detect language
-        event_queue.put({
-            "event": "step_update",
-            "step_id": "language",
             "status": "processing"
-        })
-        
-        lang, confidence = detect_language(question)
-        original_language = lang
-        result_data["original_language"] = original_language
-        
-        event_queue.put({
-            "event": "step_update",
-            "step_id": "language",
-            "status": "completed",
-            "details": {"language": lang, "confidence": float(confidence)}
-        })
-        current_progress += progress_increment
-        event_queue.put({"event": "progress", "value": current_progress})
+        }
         
         # Store the original question for reference
         original_question = question
         
-        # Process question for decomposition (using original language)
+        # Process question for decomposition and translation
         event_queue.put({
             "event": "step_update",
             "step_id": "decomposition",
             "status": "processing"
         })
         
-        # Pass the original question for decomposition with language info
-        decomposition = decompose_question(question, language=lang)
+        # First identify language through decomposition
+        # Passing empty string for language to let decomposition function detect it
+        decomposition = decompose_question(question, language="")
         result_data["decomposition"] = decomposition
+        
+        # Get translated question and detected language
+        search_question = decomposition.get("translated_question", question)
+        detected_language = decomposition.get("detected_language", "en")
+        result_data["original_language"] = detected_language
+        
+        if detected_language != "en" and search_question != question:
+            print(f"Using translated question from decomposition: {search_question}")
         
         event_queue.put({
             "event": "step_update",
@@ -367,11 +283,6 @@ def process_question_async(question, session_id):
         })
         current_progress += progress_increment
         event_queue.put({"event": "progress", "value": current_progress})
-        
-        # Use translated question from decomposition if available
-        search_question = decomposition.get("translated_question", question)
-        if lang != "en" and search_question != question:
-            print(f"Using translated question from decomposition: {search_question}")
         
         # Prepare search queries - use translated question for search
         all_queries = []
@@ -425,7 +336,7 @@ def process_question_async(question, session_id):
             original_question, 
             search_results,
             ensure_relevance=True,
-            target_language=lang  # Pass target language to generate answer in user's language
+            target_language=detected_language  # Pass target language to generate answer in user's language
         )
         result_data["answer"] = answer
         
@@ -478,9 +389,9 @@ def process_question_async(question, session_id):
             display_query = query
             if query == search_question and search_question != original_question:
                 display_query = f"{original_question} [Translated: {query}]"
-            elif lang != "en" and query in decomposition.get("sub_questions", []):
+            elif detected_language != "en" and query in decomposition.get("sub_questions", []):
                 # This is a sub-question that was already translated by DeepSeek
-                display_query = f"{query} [Translated from {lang}]"
+                display_query = f"{query} [Translated from {detected_language}]"
             
             viz_data.append({
                 "query": display_query,
@@ -492,8 +403,8 @@ def process_question_async(question, session_id):
         result_data["status"] = "success"
         
         # For non-English queries, add a translation note
-        if lang != "en":
-            result_data["translation_note"] = f"Your question was translated from {lang} to English for processing."
+        if detected_language != "en":
+            result_data["translation_note"] = f"Your question was translated from {detected_language} to English for processing."
         
         # Debug the result data before sending
         print(f"[Session {session_id}] Sending result data. Answer present: {'Yes' if 'answer' in result_data else 'No'}")
