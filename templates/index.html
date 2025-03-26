@@ -24,6 +24,18 @@
         margin-right: auto;
     }
     
+    .dark .user-message {
+        background-color: #1e40af;
+        border: 1px solid #1e3a8a;
+        color: #f1f5f9;
+    }
+    
+    .dark .bot-message {
+        background-color: #1e293b;
+        border: 1px solid #334155;
+        color: #f8fafc;
+    }
+    
     /* Visualization panel */
     .visualization-panel {
         transition: max-height 0.3s ease, opacity 0.3s ease;
@@ -36,29 +48,157 @@
         max-height: 600px;
         opacity: 1;
     }
+    
+    /* Process steps */
+    .process-step {
+        position: relative;
+        padding-left: 30px;
+        margin-bottom: 12px;
+        transition: all 0.3s ease;
+    }
+    
+    .process-step::before {
+        content: '';
+        position: absolute;
+        left: 10px;
+        top: 0;
+        height: 100%;
+        width: 2px;
+        background-color: #e2e8f0;
+    }
+    
+    .dark .process-step::before {
+        background-color: #334155;
+    }
+    
+    .process-step:last-child::before {
+        display: none;
+    }
+    
+    .step-indicator {
+        position: absolute;
+        left: 0;
+        top: 0;
+        width: 22px;
+        height: 22px;
+        border-radius: 50%;
+        background-color: #f8fafc;
+        border: 2px solid #e2e8f0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 1;
+    }
+    
+    .dark .step-indicator {
+        background-color: #1e293b;
+        border-color: #334155;
+    }
+    
+    .step-indicator.pending {
+        border-color: #94a3b8;
+    }
+    
+    .step-indicator.processing {
+        border-color: #0ea5e9;
+        animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+    }
+    
+    .step-indicator.completed {
+        border-color: #10b981;
+        background-color: #dcfce7;
+    }
+    
+    .dark .step-indicator.completed {
+        background-color: #064e3b;
+    }
+    
+    .step-indicator.error {
+        border-color: #ef4444;
+        background-color: #fee2e2;
+    }
+    
+    .dark .step-indicator.error {
+        background-color: #7f1d1d;
+    }
+    
+    .step-indicator.skipped {
+        border-color: #f59e0b;
+        background-color: #fef3c7;
+    }
+    
+    .dark .step-indicator.skipped {
+        background-color: #78350f;
+    }
+    
+    /* Results card animations */
+    .result-card {
+        animation: slideIn 0.3s ease-out forwards;
+        opacity: 0;
+    }
+    
+    @keyframes slideIn {
+        from {
+            transform: translateY(20px);
+            opacity: 0;
+        }
+        to {
+            transform: translateY(0);
+            opacity: 1;
+        }
+    }
+    
+    /* Pulsing animation for active elements */
+    .pulse-border {
+        position: relative;
+    }
+    
+    .pulse-border::after {
+        content: '';
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        border: 2px solid #0ea5e9;
+        border-radius: inherit;
+        opacity: 0;
+        animation: pulseBorder 2s cubic-bezier(0, 0, 0.2, 1) infinite;
+    }
+    
+    @keyframes pulseBorder {
+        0% {
+            transform: scale(1);
+            opacity: 0.7;
+        }
+        100% {
+            transform: scale(1.05);
+            opacity: 0;
+        }
+    }
 </style>
 {% endblock %}
 
 {% block content %}
 <div class="flex flex-col lg:flex-row gap-6 h-[calc(100vh-180px)]">
     <!-- Chat section -->
-    <div class="flex-1 flex flex-col bg-white rounded-lg shadow-soft overflow-hidden border border-gray-200">
+    <div class="flex-1 flex flex-col bg-white dark:bg-dark-300 rounded-lg shadow-soft overflow-hidden border border-gray-200 dark:border-dark-100 transition-colors">
         <!-- Chat header -->
-        <div class="p-4 border-b border-gray-200 bg-white">
+        <div class="p-4 border-b border-gray-200 dark:border-dark-100 bg-white dark:bg-dark-300 transition-colors">
             <div class="flex items-center justify-between">
                 <div class="flex items-center space-x-3">
-                    <div class="w-10 h-10 bg-primary-100 text-primary-600 rounded-full flex items-center justify-center">
+                    <div class="w-10 h-10 bg-primary-100 dark:bg-primary-900/30 text-primary-600 dark:text-primary-400 rounded-full flex items-center justify-center">
                         <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
                         </svg>
                     </div>
                     <div>
-                        <h2 class="text-lg font-medium text-secondary-900">Wisdom Assistant</h2>
-                        <p class="text-sm text-secondary-500">Ask me anything from your PDFs</p>
+                        <h2 class="text-lg font-medium text-secondary-900 dark:text-white transition-colors">Wisdom Assistant</h2>
+                        <p class="text-sm text-secondary-500 dark:text-gray-400 transition-colors">Ask me anything from your PDFs</p>
                     </div>
                 </div>
                 <div>
-                    <span id="status-indicator" class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
+                    <span id="status-indicator" class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400">
                         <svg class="-ml-0.5 mr-1.5 h-2 w-2 text-green-400" fill="currentColor" viewBox="0 0 8 8">
                             <circle cx="4" cy="4" r="3" />
                         </svg>
@@ -69,10 +209,10 @@
         </div>
         
         <!-- Chat messages -->
-        <div id="chat-messages" class="flex-1 overflow-y-auto p-4 space-y-4 bg-gray-50">
+        <div id="chat-messages" class="flex-1 overflow-y-auto p-4 space-y-4 bg-gray-50 dark:bg-dark-400 transition-colors">
             <!-- Welcome message -->
             <div class="message bot-message slide-in">
-                <p class="text-secondary-800">
+                <p class="text-secondary-800 dark:text-gray-200">
                     Hello! I'm your Wisdom Assistant. I can help you find answers from your PDF knowledge base.
                     Ask me any question, and I'll search through your documents to find the most relevant information.
                 </p>
@@ -81,18 +221,18 @@
         </div>
         
         <!-- Chat input -->
-        <div class="p-4 border-t border-gray-200 bg-white">
+        <div class="p-4 border-t border-gray-200 dark:border-dark-100 bg-white dark:bg-dark-300 transition-colors">
             <form id="question-form" class="flex space-x-2">
                 <input 
                     type="text" 
                     id="question-input" 
                     placeholder="Ask a question..." 
-                    class="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+                    class="flex-1 px-4 py-2 border border-gray-300 dark:border-dark-100 bg-white dark:bg-dark-200 text-secondary-800 dark:text-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-colors"
                     required
                 >
                 <button 
                     type="submit" 
-                    class="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 transition-colors"
+                    class="px-4 py-2 bg-primary-600 hover:bg-primary-700 dark:bg-primary-700 dark:hover:bg-primary-600 text-white rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 transition-colors"
                 >
                     <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
                         <path fill-rule="evenodd" d="M10.293 3.293a1 1 0 011.414 0l6 6a1 1 0 010 1.414l-6 6a1 1 0 01-1.414-1.414L14.586 11H3a1 1 0 110-2h11.586l-4.293-4.293a1 1 0 010-1.414z" clip-rule="evenodd" />
@@ -103,25 +243,28 @@
     </div>
     
     <!-- Visualization section -->
-    <div id="visualization-container" class="lg:w-1/3 xl:w-2/5 flex flex-col bg-white rounded-lg shadow-soft overflow-hidden border border-gray-200 hidden lg:flex">
+    <div id="visualization-container" class="lg:w-1/3 xl:w-2/5 flex flex-col bg-white dark:bg-dark-300 rounded-lg shadow-soft overflow-hidden border border-gray-200 dark:border-dark-100 hidden lg:flex transition-colors">
         <!-- Visualization header -->
-        <div class="p-4 border-b border-gray-200 bg-white">
-            <h2 class="text-lg font-medium text-secondary-900">Search Visualization</h2>
-            <p class="text-sm text-secondary-500">See how the vector search works</p>
+        <div class="p-4 border-b border-gray-200 dark:border-dark-100 bg-white dark:bg-dark-300 transition-colors">
+            <h2 class="text-lg font-medium text-secondary-900 dark:text-white transition-colors">Search Visualization</h2>
+            <p class="text-sm text-secondary-500 dark:text-gray-400 transition-colors">See how the vector search works</p>
         </div>
         
         <!-- Visualization content -->
         <div class="flex-1 overflow-y-auto p-4">
             <!-- Tabs -->
-            <div class="border-b border-gray-200">
+            <div class="border-b border-gray-200 dark:border-dark-100 transition-colors">
                 <nav class="-mb-px flex space-x-6">
-                    <button id="tab-decomposition" class="tab-button border-primary-500 text-primary-600 whitespace-nowrap py-2 px-1 border-b-2 font-medium text-sm">
+                    <button id="tab-process" class="tab-button border-primary-500 text-primary-600 dark:text-primary-400 whitespace-nowrap py-2 px-1 border-b-2 font-medium text-sm transition-colors">
+                        Process
+                    </button>
+                    <button id="tab-decomposition" class="tab-button border-transparent text-secondary-500 dark:text-gray-400 hover:text-secondary-700 dark:hover:text-gray-300 hover:border-secondary-300 whitespace-nowrap py-2 px-1 border-b-2 font-medium text-sm transition-colors">
                         Decomposition
                     </button>
-                    <button id="tab-search" class="tab-button border-transparent text-secondary-500 hover:text-secondary-700 hover:border-secondary-300 whitespace-nowrap py-2 px-1 border-b-2 font-medium text-sm">
+                    <button id="tab-search" class="tab-button border-transparent text-secondary-500 dark:text-gray-400 hover:text-secondary-700 dark:hover:text-gray-300 hover:border-secondary-300 whitespace-nowrap py-2 px-1 border-b-2 font-medium text-sm transition-colors">
                         Search Results
                     </button>
-                    <button id="tab-similarity" class="tab-button border-transparent text-secondary-500 hover:text-secondary-700 hover:border-secondary-300 whitespace-nowrap py-2 px-1 border-b-2 font-medium text-sm">
+                    <button id="tab-similarity" class="tab-button border-transparent text-secondary-500 dark:text-gray-400 hover:text-secondary-700 dark:hover:text-gray-300 hover:border-secondary-300 whitespace-nowrap py-2 px-1 border-b-2 font-medium text-sm transition-colors">
                         Similarity
                     </button>
                 </nav>
@@ -129,19 +272,32 @@
             
             <!-- Tab content -->
             <div class="mt-4 space-y-4">
+                <!-- Process view (new) -->
+                <div id="view-process" class="tab-content">
+                    <div class="p-4 bg-gray-50 dark:bg-dark-400 rounded-lg transition-colors">
+                        <h3 class="font-medium text-secondary-900 dark:text-white mb-4 transition-colors">Processing Steps</h3>
+                        <div id="process-steps" class="pl-4">
+                            <!-- Process steps will be rendered here -->
+                            <div class="text-sm text-secondary-500 dark:text-gray-400 transition-colors">
+                                Ask a question to see the processing steps
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
                 <!-- Decomposition view -->
-                <div id="view-decomposition" class="tab-content">
-                    <div class="p-4 bg-gray-50 rounded-lg">
-                        <h3 class="font-medium text-secondary-900 mb-2">Question Analysis</h3>
-                        <p id="question-analysis" class="text-sm text-secondary-700 mb-4">Ask a question to see the analysis</p>
+                <div id="view-decomposition" class="tab-content hidden">
+                    <div class="p-4 bg-gray-50 dark:bg-dark-400 rounded-lg transition-colors">
+                        <h3 class="font-medium text-secondary-900 dark:text-white mb-2 transition-colors">Question Analysis</h3>
+                        <p id="question-analysis" class="text-sm text-secondary-700 dark:text-gray-300 mb-4 transition-colors">Ask a question to see the analysis</p>
                         
-                        <h3 class="font-medium text-secondary-900 mb-2">Sub-questions</h3>
-                        <ul id="sub-questions-list" class="list-disc pl-5 text-sm text-secondary-700 mb-4">
+                        <h3 class="font-medium text-secondary-900 dark:text-white mb-2 transition-colors">Sub-questions</h3>
+                        <ul id="sub-questions-list" class="list-disc pl-5 text-sm text-secondary-700 dark:text-gray-300 mb-4 transition-colors">
                             <li>Sub-questions will appear here</li>
                         </ul>
                         
-                        <h3 class="font-medium text-secondary-900 mb-2">Key Concepts</h3>
-                        <ul id="concepts-list" class="list-disc pl-5 text-sm text-secondary-700">
+                        <h3 class="font-medium text-secondary-900 dark:text-white mb-2 transition-colors">Key Concepts</h3>
+                        <ul id="concepts-list" class="list-disc pl-5 text-sm text-secondary-700 dark:text-gray-300 transition-colors">
                             <li>Key concepts will appear here</li>
                         </ul>
                     </div>
@@ -150,7 +306,7 @@
                 <!-- Search results view -->
                 <div id="view-search" class="tab-content hidden">
                     <div id="search-results" class="space-y-3">
-                        <p class="text-sm text-secondary-500">Ask a question to see search results</p>
+                        <p class="text-sm text-secondary-500 dark:text-gray-400 transition-colors">Ask a question to see search results</p>
                     </div>
                 </div>
                 
@@ -180,11 +336,21 @@
     const tabContents = document.querySelectorAll('.tab-content');
     
     // Visualization elements
+    const processSteps = document.getElementById('process-steps');
     const questionAnalysis = document.getElementById('question-analysis');
     const subQuestionsList = document.getElementById('sub-questions-list');
     const conceptsList = document.getElementById('concepts-list');
     const searchResults = document.getElementById('search-results');
     const similarityChart = document.getElementById('similarity-chart');
+    
+    // Process step icons
+    const stepIcons = {
+        'pending': '<svg class="w-3 h-3 text-gray-400 dark:text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>',
+        'processing': '<svg class="w-3 h-3 text-primary-500 animate-spin" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>',
+        'completed': '<svg class="w-3 h-3 text-green-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" /></svg>',
+        'error': '<svg class="w-3 h-3 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" /></svg>',
+        'skipped': '<svg class="w-3 h-3 text-yellow-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 5l7 7-7 7M5 5l7 7-7 7" /></svg>'
+    };
     
     // Check service health
     async function checkHealth() {
@@ -199,7 +365,7 @@
                     </svg>
                     Online
                 `;
-                statusIndicator.className = 'inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800';
+                statusIndicator.className = 'inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400';
             } else {
                 statusIndicator.innerHTML = `
                     <svg class="-ml-0.5 mr-1.5 h-2 w-2 text-red-400" fill="currentColor" viewBox="0 0 8 8">
@@ -207,7 +373,7 @@
                     </svg>
                     Offline
                 `;
-                statusIndicator.className = 'inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800';
+                statusIndicator.className = 'inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400';
             }
         } catch (error) {
             console.error('Health check failed:', error);
@@ -217,7 +383,7 @@
                 </svg>
                 Unknown
             `;
-            statusIndicator.className = 'inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800';
+            statusIndicator.className = 'inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400';
         }
     }
     
@@ -235,9 +401,9 @@
                 .replace(/\*(.*?)\*/g, '<em>$1</em>')
                 .replace(/\n- /g, '<br>• ');
                 
-            messageElement.innerHTML = `<p class="text-secondary-800">${formattedContent}</p>`;
+            messageElement.innerHTML = `<p class="text-secondary-800 dark:text-gray-200">${formattedContent}</p>`;
         } else {
-            messageElement.innerHTML = `<p class="text-secondary-800">${content}</p>`;
+            messageElement.innerHTML = `<p class="text-secondary-800 dark:text-gray-200">${content}</p>`;
         }
         
         chatMessages.appendChild(messageElement);
@@ -268,6 +434,97 @@
         }
     }
     
+    // Initialize process steps visualization
+    function initProcessSteps(steps) {
+        processSteps.innerHTML = '';
+        
+        steps.forEach((step, index) => {
+            const stepElement = document.createElement('div');
+            stepElement.id = `step-${step.id}`;
+            stepElement.className = 'process-step';
+            
+            stepElement.innerHTML = `
+                <div class="step-indicator ${step.status}">
+                    ${stepIcons[step.status]}
+                </div>
+                <div class="ml-2">
+                    <h4 class="text-sm font-medium text-secondary-800 dark:text-white">${step.name}</h4>
+                    <p class="text-xs text-secondary-500 dark:text-gray-400">${getStepStatusText(step.status)}</p>
+                    <div class="step-details text-xs mt-1 text-secondary-600 dark:text-gray-300 hidden"></div>
+                </div>
+            `;
+            
+            processSteps.appendChild(stepElement);
+        });
+    }
+    
+    // Update process step visualization
+    function updateProcessStep(stepId, status, details = null) {
+        const stepElement = document.getElementById(`step-${stepId}`);
+        if (!stepElement) return;
+        
+        // Find the indicator element and update it
+        const indicator = stepElement.querySelector('.step-indicator');
+        indicator.className = `step-indicator ${status}`;
+        indicator.innerHTML = stepIcons[status];
+        
+        // Update status text
+        const statusText = stepElement.querySelector('p');
+        statusText.textContent = getStepStatusText(status);
+        
+        // Add details if provided
+        if (details) {
+            const detailsElement = stepElement.querySelector('.step-details');
+            detailsElement.innerHTML = formatStepDetails(stepId, details);
+            detailsElement.classList.remove('hidden');
+        }
+        
+        // Add active class
+        if (status === 'processing') {
+            stepElement.classList.add('active');
+        } else {
+            stepElement.classList.remove('active');
+        }
+    }
+    
+    // Format step details for display
+    function formatStepDetails(stepId, details) {
+        if (!details) return '';
+        
+        switch(stepId) {
+            case 'language':
+                return `Detected: <strong>${details.language}</strong> (${Math.round(details.confidence * 100)}% confidence)`;
+            case 'translation':
+                if (details.reason) return `Reason: ${details.reason}`;
+                if (details.error) return `Error: ${details.error}`;
+                return `Translated from <strong>${details.original.substring(0, 30)}...</strong>`;
+            case 'decomposition':
+                return `Identified ${details.sub_questions?.length || 0} sub-questions and ${details.concepts?.length || 0} concepts`;
+            case 'search':
+                return `Searched ${details.query_count} queries, found ${details.result_count} results`;
+            case 'answer':
+                return `Generated answer (${details.length} characters)`;
+            case 'translation_back':
+                if (details.reason) return `Reason: ${details.reason}`;
+                if (details.error) return `Error: ${details.error}`;
+                return `Translated answer to ${details.translated_to}`;
+            default:
+                return JSON.stringify(details);
+        }
+    }
+    
+    // Get human-readable status text
+    function getStepStatusText(status) {
+        switch(status) {
+            case 'pending': return 'Waiting';
+            case 'processing': return 'Processing...';
+            case 'completed': return 'Completed';
+            case 'error': return 'Error';
+            case 'skipped': return 'Skipped';
+            default: return status;
+        }
+    }
+    
     // Handle form submission
     questionForm.addEventListener('submit', async (e) => {
         e.preventDefault();
@@ -284,9 +541,12 @@
         // Show typing indicator
         addTypingIndicator();
         
-        // Show visualization on mobile
+        // Show visualization container and switch to process tab
         visualizationContainer.classList.remove('hidden');
         visualizationContainer.classList.add('flex');
+        
+        // Switch to process tab
+        switchTab('process');
         
         try {
             // Send question to API
@@ -321,6 +581,18 @@
     
     // Update visualization with data
     function updateVisualization(data) {
+        // Update process steps
+        if (data.process) {
+            initProcessSteps(data.process);
+            
+            // Animate process steps
+            data.process.forEach(step => {
+                setTimeout(() => {
+                    updateProcessStep(step.id, step.status, step.details);
+                }, 300);
+            });
+        }
+        
         // Update decomposition view
         if (data.decomposition) {
             questionAnalysis.textContent = data.decomposition.analysis || 'No analysis available';
@@ -331,13 +603,13 @@
                 data.decomposition.sub_questions.forEach(question => {
                     const li = document.createElement('li');
                     li.textContent = question;
-                    li.className = 'text-sm text-secondary-700 mb-1';
+                    li.className = 'text-sm text-secondary-700 dark:text-gray-300 mb-1 transition-colors';
                     subQuestionsList.appendChild(li);
                 });
             } else {
                 const li = document.createElement('li');
                 li.textContent = 'No sub-questions identified';
-                li.className = 'text-sm text-secondary-500';
+                li.className = 'text-sm text-secondary-500 dark:text-gray-400 transition-colors';
                 subQuestionsList.appendChild(li);
             }
             
@@ -351,13 +623,13 @@
                     } else if (concept.name && concept.description) {
                         li.innerHTML = `<strong>${concept.name}:</strong> ${concept.description}`;
                     }
-                    li.className = 'text-sm text-secondary-700 mb-1';
+                    li.className = 'text-sm text-secondary-700 dark:text-gray-300 mb-1 transition-colors';
                     conceptsList.appendChild(li);
                 });
             } else {
                 const li = document.createElement('li');
                 li.textContent = 'No key concepts identified';
-                li.className = 'text-sm text-secondary-500';
+                li.className = 'text-sm text-secondary-500 dark:text-gray-400 transition-colors';
                 conceptsList.appendChild(li);
             }
         }
@@ -366,6 +638,17 @@
         if (data.visualization) {
             searchResults.innerHTML = '';
             
+            // Add translation note if needed
+            if (data.original_language && data.original_language !== 'en') {
+                const translationNote = document.createElement('div');
+                translationNote.className = 'mb-3 p-2 bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300 rounded-md text-xs transition-colors';
+                translationNote.innerHTML = `<strong>Note:</strong> Your question was translated from ${data.original_language} to English for processing.`;
+                searchResults.appendChild(translationNote);
+            }
+            
+            // Create animation delay counter for staggered animations
+            let animationDelay = 0;
+            
             data.visualization.forEach(query => {
                 // Create query group
                 const queryGroup = document.createElement('div');
@@ -373,7 +656,7 @@
                 
                 // Query header
                 const queryHeader = document.createElement('h3');
-                queryHeader.className = 'text-sm font-medium text-secondary-900 mb-2';
+                queryHeader.className = 'text-sm font-medium text-secondary-900 dark:text-white mb-2 transition-colors';
                 queryHeader.textContent = `Query: "${query.query}"`;
                 queryGroup.appendChild(queryHeader);
                 
@@ -383,8 +666,11 @@
                     resultsList.className = 'space-y-2';
                     
                     query.results.forEach((result, index) => {
+                        animationDelay += 50;  // Increment delay for staggered animation
+                        
                         const resultItem = document.createElement('div');
-                        resultItem.className = 'p-3 bg-gray-50 rounded border border-gray-200 text-sm';
+                        resultItem.className = 'result-card p-3 bg-gray-50 dark:bg-dark-400 rounded border border-gray-200 dark:border-dark-100 text-sm transition-colors';
+                        resultItem.style.animationDelay = `${animationDelay}ms`;
                         
                         // Format based on type
                         let content = '';
@@ -392,29 +678,29 @@
                         if (result.type === 'concept') {
                             content = `
                                 <div class="flex justify-between items-start mb-1">
-                                    <span class="font-medium text-secondary-900">${result.label}</span>
-                                    <span class="text-xs px-2 py-0.5 bg-blue-100 text-blue-800 rounded-full">${(result.score * 100).toFixed(1)}%</span>
+                                    <span class="font-medium text-secondary-900 dark:text-white transition-colors">${result.label}</span>
+                                    <span class="text-xs px-2 py-0.5 bg-blue-100 dark:bg-blue-900/30 text-blue-800 dark:text-blue-300 rounded-full transition-colors">${(result.score * 100).toFixed(1)}%</span>
                                 </div>
-                                <p class="text-secondary-700">${result.content}</p>
-                                <p class="text-xs text-secondary-500 mt-1">Source: ${result.source}</p>
+                                <p class="text-secondary-700 dark:text-gray-300 transition-colors">${result.content}</p>
+                                <p class="text-xs text-secondary-500 dark:text-gray-400 mt-1 transition-colors">Source: ${result.source}</p>
                             `;
                         } else if (result.type === 'qa_pair' || result.type === 'question') {
                             content = `
                                 <div class="flex justify-between items-start mb-1">
-                                    <span class="font-medium text-secondary-900">Q: ${result.label}</span>
-                                    <span class="text-xs px-2 py-0.5 bg-blue-100 text-blue-800 rounded-full">${(result.score * 100).toFixed(1)}%</span>
+                                    <span class="font-medium text-secondary-900 dark:text-white transition-colors">Q: ${result.label}</span>
+                                    <span class="text-xs px-2 py-0.5 bg-blue-100 dark:bg-blue-900/30 text-blue-800 dark:text-blue-300 rounded-full transition-colors">${(result.score * 100).toFixed(1)}%</span>
                                 </div>
-                                <p class="text-secondary-700">A: ${result.content}</p>
-                                <p class="text-xs text-secondary-500 mt-1">Source: ${result.source}</p>
+                                <p class="text-secondary-700 dark:text-gray-300 transition-colors">A: ${result.content}</p>
+                                <p class="text-xs text-secondary-500 dark:text-gray-400 mt-1 transition-colors">Source: ${result.source}</p>
                             `;
                         } else {
                             content = `
                                 <div class="flex justify-between items-start mb-1">
-                                    <span class="font-medium text-secondary-900">Text</span>
-                                    <span class="text-xs px-2 py-0.5 bg-blue-100 text-blue-800 rounded-full">${(result.score * 100).toFixed(1)}%</span>
+                                    <span class="font-medium text-secondary-900 dark:text-white transition-colors">Text</span>
+                                    <span class="text-xs px-2 py-0.5 bg-blue-100 dark:bg-blue-900/30 text-blue-800 dark:text-blue-300 rounded-full transition-colors">${(result.score * 100).toFixed(1)}%</span>
                                 </div>
-                                <p class="text-secondary-700">${result.content}</p>
-                                <p class="text-xs text-secondary-500 mt-1">Source: ${result.source}</p>
+                                <p class="text-secondary-700 dark:text-gray-300 transition-colors">${result.content}</p>
+                                <p class="text-xs text-secondary-500 dark:text-gray-400 mt-1 transition-colors">Source: ${result.source}</p>
                             `;
                         }
                         
@@ -426,7 +712,7 @@
                 } else {
                     // No results message
                     const noResults = document.createElement('p');
-                    noResults.className = 'text-sm text-secondary-500 p-3 bg-gray-50 rounded border border-gray-200';
+                    noResults.className = 'text-sm text-secondary-500 dark:text-gray-400 p-3 bg-gray-50 dark:bg-dark-400 rounded border border-gray-200 dark:border-dark-100 transition-colors';
                     noResults.textContent = 'No results found for this query';
                     queryGroup.appendChild(noResults);
                 }
@@ -474,6 +760,27 @@
                 }
             });
             
+            // Adjust chart layout for dark mode
+            const isDarkMode = document.documentElement.classList.contains('dark');
+            const chartLayout = {
+                title: 'Top 10 Most Similar Results',
+                font: {
+                    color: isDarkMode ? '#f1f5f9' : '#1e293b'
+                },
+                paper_bgcolor: isDarkMode ? '#1e293b' : '#ffffff',
+                plot_bgcolor: isDarkMode ? '#1e293b' : '#ffffff',
+                margin: { l: 150, r: 10, t: 40, b: 30 },
+                xaxis: {
+                    title: 'Similarity Score',
+                    range: [0, 1],
+                    gridcolor: isDarkMode ? '#334155' : '#e2e8f0'
+                },
+                yaxis: {
+                    automargin: true,
+                    gridcolor: isDarkMode ? '#334155' : '#e2e8f0'
+                }
+            };
+            
             // Create bar chart
             Plotly.newPlot('similarity-chart', [{
                 x: values,
@@ -487,40 +794,63 @@
                 textposition: 'auto',
                 hoverinfo: 'text',
                 hovertext: topResults.map(r => `${r.label}<br>Type: ${r.type}<br>Source: ${r.source}<br>Similarity: ${(r.similarity * 100).toFixed(1)}%`)
-            }], {
-                title: 'Top 10 Most Similar Results',
-                margin: { l: 150, r: 10, t: 40, b: 30 },
-                xaxis: {
-                    title: 'Similarity Score',
-                    range: [0, 1]
-                },
-                yaxis: {
-                    automargin: true
-                }
-            }, {
+            }], chartLayout, {
                 responsive: true
             });
         }
     }
     
+    // Switch to specified tab
+    function switchTab(tabId) {
+        // Update active tab button
+        tabButtons.forEach(btn => {
+            const id = btn.id.replace('tab-', '');
+            if (id === tabId) {
+                btn.classList.remove('border-transparent', 'text-secondary-500', 'hover:text-secondary-700', 'hover:border-secondary-300');
+                btn.classList.add('border-primary-500', 'text-primary-600', 'dark:text-primary-400');
+            } else {
+                btn.classList.remove('border-primary-500', 'text-primary-600', 'dark:text-primary-400');
+                btn.classList.add('border-transparent', 'text-secondary-500', 'hover:text-secondary-700', 'hover:border-secondary-300');
+            }
+        });
+        
+        // Show the corresponding tab content
+        tabContents.forEach(content => {
+            content.classList.add('hidden');
+        });
+        document.getElementById(`view-${tabId}`).classList.remove('hidden');
+    }
+    
     // Tab switching
     tabButtons.forEach(button => {
         button.addEventListener('click', () => {
-            // Update active tab button
-            tabButtons.forEach(btn => {
-                btn.classList.remove('border-primary-500', 'text-primary-600');
-                btn.classList.add('border-transparent', 'text-secondary-500', 'hover:text-secondary-700', 'hover:border-secondary-300');
-            });
-            button.classList.remove('border-transparent', 'text-secondary-500', 'hover:text-secondary-700', 'hover:border-secondary-300');
-            button.classList.add('border-primary-500', 'text-primary-600');
-            
-            // Show the corresponding tab content
-            const tabId = button.id.replace('tab-', 'view-');
-            tabContents.forEach(content => {
-                content.classList.add('hidden');
-            });
-            document.getElementById(tabId).classList.remove('hidden');
+            const tabId = button.id.replace('tab-', '');
+            switchTab(tabId);
         });
+    });
+    
+    // Dark mode chart update
+    document.getElementById('theme-toggle').addEventListener('click', function() {
+        // Wait for theme to update
+        setTimeout(() => {
+            const chartElement = document.getElementById('similarity-chart');
+            if (chartElement && chartElement.data) {
+                const isDarkMode = document.documentElement.classList.contains('dark');
+                Plotly.relayout('similarity-chart', {
+                    font: {
+                        color: isDarkMode ? '#f1f5f9' : '#1e293b'
+                    },
+                    paper_bgcolor: isDarkMode ? '#1e293b' : '#ffffff',
+                    plot_bgcolor: isDarkMode ? '#1e293b' : '#ffffff',
+                    xaxis: {
+                        gridcolor: isDarkMode ? '#334155' : '#e2e8f0'
+                    },
+                    yaxis: {
+                        gridcolor: isDarkMode ? '#334155' : '#e2e8f0'
+                    }
+                });
+            }
+        }, 100);
     });
     
     // Initial health check
