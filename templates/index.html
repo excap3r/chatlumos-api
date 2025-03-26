@@ -167,7 +167,7 @@
             messageContainer.className = 'flex justify-end mb-4';
             
             const messageDiv = document.createElement('div');
-            messageDiv.className = 'max-w-[80%] bg-accent-500 dark:bg-accent-600 text-white px-5 py-3 rounded-2xl rounded-tr-md message-transition mr-4';
+            messageDiv.className = 'max-w-[80%] bg-gray-700 dark:bg-gray-700 text-white px-5 py-3 rounded-2xl rounded-tr-md message-transition mr-4';
             messageDiv.textContent = message;
             
             messageContainer.appendChild(messageDiv);
@@ -183,7 +183,7 @@
             messageContainer.className = 'flex justify-start mb-4';
             
             const messageDiv = document.createElement('div');
-            messageDiv.className = 'max-w-[90%] bg-gray-200 dark:bg-grok-800 text-gray-800 dark:text-white px-5 py-3 rounded-2xl rounded-tl-md message-transition ml-4';
+            messageDiv.className = 'max-w-[100%] bg-gray-200 dark:bg-grok-800 text-gray-800 dark:text-white px-5 py-3 rounded-2xl rounded-tl-md message-transition ml-4';
             
             if (message && message.trim() !== '') {
                 messageDiv.textContent = message;
@@ -310,14 +310,23 @@
         
         // Create a progress container in an assistant message
         function createProgressContainer() {
-            const messageDiv = addAssistantMessage('');
-            const progressId = `progress-${Date.now()}`;
+            const messageContainer = document.createElement('div');
+            messageContainer.className = 'flex justify-start mb-4';
             
+            const messageDiv = document.createElement('div');
+            messageDiv.className = 'max-w-[94%] text-gray-800 dark:text-white px-5 py-3 rounded-2xl message-transition ml-4';
+            
+            const progressId = `progress-${Date.now()}`;
             const progressContainer = document.createElement('div');
             progressContainer.id = progressId;
             progressContainer.className = 'pb-2';
             
             messageDiv.appendChild(progressContainer);
+            messageContainer.appendChild(messageDiv);
+            chatMessages.appendChild(messageContainer);
+            
+            // Scroll to bottom
+            scrollToBottom();
             
             return {
                 containerId: progressId, 
@@ -517,7 +526,7 @@
                                 
                                 // Create a new message bubble for the answer that will appear after the progress container
                                 answerMessageElement = document.createElement('div');
-                                answerMessageElement.className = 'max-w-[90%] bg-gray-200 dark:bg-grok-800 text-gray-800 dark:text-white rounded-2xl rounded-tl-md message-transition ml-4';
+                                answerMessageElement.className = 'max-w-[100%] text-gray-800 dark:text-white rounded-2xl rounded-tl-md message-transition ml-4';
                                 
                                 // Insert the answer element after the progress container's parent (the message div)
                                 if (progressContainer && progressContainer.parentElement) {
@@ -564,7 +573,7 @@
                             
                             // Create a new message bubble that will appear after the progress container
                             answerMessageElement = document.createElement('div');
-                            answerMessageElement.className = 'max-w-[90%] bg-gray-200 dark:bg-grok-800 text-gray-800 dark:text-white px-5 py-3 rounded-2xl rounded-tl-md message-transition ml-4';
+                            answerMessageElement.className = 'max-w-[100%] bg-gray-200 dark:bg-grok-800 text-gray-800 dark:text-white px-5 py-3 rounded-2xl rounded-tl-md message-transition ml-4';
                             answerMessageElement.textContent = answer;
                             
                             // Insert the answer element after the progress container's parent (the message div)
