@@ -21,9 +21,9 @@ import textwrap
 
 # Import Pinecone
 try:
-    from pinecone import Pinecone
+    import pinecone
 except ImportError:
-    print("Error: Pinecone package not installed. Run 'pip install pinecone-client'")
+    print("Error: Pinecone package not installed. Run 'pip install pinecone'")
     sys.exit(1)
 
 # Import embedding model
@@ -175,10 +175,12 @@ def init_pinecone(api_key: str) -> bool:
     """Initialize Pinecone client."""
     global pc
     try:
-        pc = Pinecone(api_key=api_key)
-        # Verify connection by listing indexes
+        # Initialize with the current API (v6.0.2)
+        pc = pinecone.Pinecone(api_key=api_key)
+        
+        # Verify connection by trying to list indexes
         try:
-            pc.list_indexes()
+            indexes = pc.list_indexes()
             return True
         except Exception as e:
             print(f"Error verifying Pinecone connection: {e}")
@@ -187,15 +189,15 @@ def init_pinecone(api_key: str) -> bool:
         print(f"Error initializing Pinecone: {e}")
         return False
 
-def load_embedding_model(model_name: str = DEFAULT_MODEL) -> Any:
+def load_embedding_model(model_name: str = DEFAULT_MODEL) -> bool:
     """Load the embedding model."""
     global embedding_model
     try:
         embedding_model = SentenceTransformer(model_name)
-        return embedding_model
+        return True
     except Exception as e:
         print(f"Error loading embedding model: {e}")
-        return None
+        return False
 
 def generate_embedding(text: str) -> List[float]:
     """Generate embedding for a single text."""
@@ -346,6 +348,8 @@ def generate_answer(question: str, retrieved_data: Dict[str, List[Dict]], api_ke
     3. Cite sources of information from the context where appropriate
     4. Do not introduce information beyond what's provided in the context
     5. Answer in a clear, concise, and well-structured format
+    6. Make responses personal and friendly, avoiding technical language when possible
+    7. DO NOT include any meta-instructions or notes about how to structure your response in your final answer
     """
     
     # Create the user prompt
@@ -363,7 +367,27 @@ def generate_answer(question: str, retrieved_data: Dict[str, List[Dict]], api_ke
     if "error" in response:
         return f"Error generating answer: {response['error']}"
     
-    return response["content"]
+    # Clean up the response to remove any meta-instructions
+    content = response["content"]
+    
+    # Remove common patterns of meta-instructions that might appear at the end
+    instruction_patterns = [
+        "Make response more personal and friendly",
+        "you don't need to talk about concepts",
+        "use that information as knowledge base",
+        "Based on the provided context",
+        "According to the context provided",
+    ]
+    
+    # Check if any instruction patterns are at the end of the response
+    for pattern in instruction_patterns:
+        if pattern.lower() in content.lower():
+            # Find where the instructions start and truncate
+            index = content.lower().find(pattern.lower())
+            if index > 0:
+                content = content[:index].strip()
+    
+    return content
 
 # ----------------- Command-Line Interface -----------------
 

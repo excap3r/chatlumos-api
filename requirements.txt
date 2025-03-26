@@ -7,8 +7,15 @@ numpy>=1.23.0
 # Optional but recommended for token counting
 tiktoken>=0.4.0
 # For vector database
-pinecone-client>=2.2.1
+pinecone>=6.0.2
 torch>=1.13.0
 sentence-transformers>=2.2.2
 # For translation
-deep-translator>=1.10.1 
+deep-translator>=1.10.1
+# Web application
+Flask>=2.0.1
+Flask-CORS>=3.0.10
+gunicorn>=20.1.0
+# Visualization
+plotly>=5.10.0
+pandas>=1.5.0 
