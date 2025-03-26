@@ -176,6 +176,83 @@
             opacity: 0;
         }
     }
+    
+    /* Progress bar styles */
+    .progress-container {
+        width: 100%;
+        height: 4px;
+        background-color: #f1f5f9;
+        border-radius: 2px;
+        overflow: hidden;
+        margin-top: 8px;
+        position: relative;
+    }
+    
+    .dark .progress-container {
+        background-color: #1e293b;
+    }
+    
+    .progress-bar {
+        height: 100%;
+        width: 0%;
+        background: linear-gradient(90deg, #0ea5e9, #a855f7);
+        border-radius: 2px;
+        transition: width 0.3s ease-out;
+    }
+    
+    /* Progress bar shine effect */
+    .progress-bar::after {
+        content: '';
+        position: absolute;
+        top: 0;
+        left: 0;
+        bottom: 0;
+        right: 0;
+        background-image: linear-gradient(
+            110deg, 
+            rgba(255, 255, 255, 0) 0%, 
+            rgba(255, 255, 255, 0.3) 40%, 
+            rgba(255, 255, 255, 0.3) 60%, 
+            rgba(255, 255, 255, 0) 100%
+        );
+        background-size: 200% 100%;
+        background-position: -100% 0;
+        animation: progressShine 2s infinite linear;
+    }
+    
+    .dark .progress-bar::after {
+        background-image: linear-gradient(
+            110deg, 
+            rgba(255, 255, 255, 0) 0%, 
+            rgba(255, 255, 255, 0.1) 40%, 
+            rgba(255, 255, 255, 0.1) 60%, 
+            rgba(255, 255, 255, 0) 100%
+        );
+    }
+    
+    @keyframes progressShine {
+        to {
+            background-position: 200% 0;
+        }
+    }
+    
+    /* Processing indicator */
+    .processing-indicator {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        font-size: 0.875rem;
+        margin-top: 0.5rem;
+        opacity: 0;
+        height: 0;
+        overflow: hidden;
+        transition: opacity 0.3s ease, height 0.3s ease;
+    }
+    
+    .processing-indicator.active {
+        opacity: 1;
+        height: 1.5rem;
+    }
 </style>
 {% endblock %}
 
@@ -204,6 +281,20 @@
                         </svg>
                         Online
                     </span>
+                </div>
+            </div>
+            
+            <!-- Progress indicator (initially hidden) -->
+            <div id="processing-container" class="mt-2 hidden">
+                <div class="processing-indicator" id="processing-indicator">
+                    <svg class="animate-spin -ml-1 mr-2 h-4 w-4 text-primary-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    <span id="processing-step" class="text-secondary-700 dark:text-gray-300">Processing your question...</span>
+                </div>
+                <div class="progress-container" id="progress-container">
+                    <div class="progress-bar" id="progress-bar"></div>
                 </div>
             </div>
         </div>
@@ -288,9 +379,6 @@
                 <!-- Decomposition view -->
                 <div id="view-decomposition" class="tab-content hidden">
                     <div class="p-4 bg-gray-50 dark:bg-dark-400 rounded-lg transition-colors">
-                        <h3 class="font-medium text-secondary-900 dark:text-white mb-2 transition-colors">Question Analysis</h3>
-                        <p id="question-analysis" class="text-sm text-secondary-700 dark:text-gray-300 mb-4 transition-colors">Ask a question to see the analysis</p>
-                        
                         <h3 class="font-medium text-secondary-900 dark:text-white mb-2 transition-colors">Sub-questions</h3>
                         <ul id="sub-questions-list" class="list-disc pl-5 text-sm text-secondary-700 dark:text-gray-300 mb-4 transition-colors">
                             <li>Sub-questions will appear here</li>
@@ -337,7 +425,6 @@
     
     // Visualization elements
     const processSteps = document.getElementById('process-steps');
-    const questionAnalysis = document.getElementById('question-analysis');
     const subQuestionsList = document.getElementById('sub-questions-list');
     const conceptsList = document.getElementById('concepts-list');
     const searchResults = document.getElementById('search-results');
@@ -434,6 +521,32 @@
         }
     }
     
+    // Show processing indicator
+    function showProcessingIndicator(step = 'Processing your question...') {
+        const container = document.getElementById('processing-container');
+        const indicator = document.getElementById('processing-indicator');
+        const stepText = document.getElementById('processing-step');
+        
+        container.classList.remove('hidden');
+        indicator.classList.add('active');
+        stepText.textContent = step;
+    }
+    
+    // Hide processing indicator
+    function hideProcessingIndicator() {
+        const container = document.getElementById('processing-container');
+        const indicator = document.getElementById('processing-indicator');
+        
+        container.classList.add('hidden');
+        indicator.classList.remove('active');
+    }
+    
+    // Update progress bar
+    function updateProgressBar(percentage) {
+        const progressBar = document.getElementById('progress-bar');
+        progressBar.style.width = `${percentage}%`;
+    }
+    
     // Initialize process steps visualization
     function initProcessSteps(steps) {
         processSteps.innerHTML = '';
@@ -485,6 +598,12 @@
         } else {
             stepElement.classList.remove('active');
         }
+        
+        // Update the processing indicator text
+        if (status === 'processing') {
+            const stepName = stepElement.querySelector('h4').textContent;
+            document.getElementById('processing-step').textContent = `${stepName}...`;
+        }
     }
     
     // Format step details for display
@@ -493,7 +612,7 @@
         
         switch(stepId) {
             case 'language':
-                return `Detected: <strong>${details.language}</strong> (${Math.round(details.confidence * 100)}% confidence)`;
+                return `Detected: <strong>${details.language}</strong> (${Math.abs(details.confidence * 100).toFixed(1)}% confidence)`;
             case 'translation':
                 if (details.reason) return `Reason: ${details.reason}`;
                 if (details.error) return `Error: ${details.error}`;
@@ -523,6 +642,84 @@
             case 'skipped': return 'Skipped';
             default: return status;
         }
+    }
+    
+    // Connect to Server-Sent Events stream
+    function connectToEventStream(sessionId) {
+        const eventSource = new EventSource(`/api/progress-stream/${sessionId}`);
+        
+        // Handle connection open
+        eventSource.onopen = function() {
+            console.log('Connected to event stream');
+        };
+        
+        // Handle connection error
+        eventSource.onerror = function(error) {
+            console.error('Event stream error:', error);
+            eventSource.close();
+            hideProcessingIndicator();
+            removeTypingIndicator();
+            addMessage('Sorry, there was an error processing your question. Please try again.');
+        };
+        
+        // Handle messages
+        eventSource.onmessage = function(event) {
+            const data = JSON.parse(event.data);
+            console.log('Event received:', data);
+            
+            switch(data.event) {
+                case 'connected':
+                    // Connection established
+                    break;
+                    
+                case 'process_init':
+                    // Initialize process steps
+                    initProcessSteps(data.process_steps);
+                    break;
+                    
+                case 'step_update':
+                    // Update step status
+                    updateProcessStep(data.step_id, data.status, data.details);
+                    break;
+                    
+                case 'progress':
+                    // Update progress bar
+                    updateProgressBar(data.value);
+                    break;
+                    
+                case 'result':
+                    // Complete result data received
+                    processResult(data.data);
+                    break;
+                    
+                case 'error':
+                    // Error occurred
+                    hideProcessingIndicator();
+                    removeTypingIndicator();
+                    addMessage(`Sorry, an error occurred: ${data.error}`);
+                    eventSource.close();
+                    break;
+                    
+                case 'complete':
+                case 'end':
+                    // Stream ended
+                    eventSource.close();
+                    hideProcessingIndicator();
+                    break;
+            }
+        };
+        
+        return eventSource;
+    }
+    
+    // Process final result data
+    function processResult(data) {
+        // Add bot response
+        removeTypingIndicator();
+        addMessage(data.answer);
+        
+        // Update visualization
+        updateVisualization(data);
     }
     
     // Handle form submission
@@ -560,21 +757,34 @@
             
             const data = await response.json();
             
-            // Remove typing indicator
-            removeTypingIndicator();
-            
             if (data.error) {
+                removeTypingIndicator();
                 addMessage('Sorry, I encountered an error: ' + data.error);
-            } else {
-                // Add bot response
-                addMessage(data.answer);
+                return;
+            }
+            
+            if (data.status === 'processing' && data.session_id) {
+                // Show processing indicator
+                showProcessingIndicator();
+                updateProgressBar(0);
                 
-                // Update visualization
-                updateVisualization(data);
+                // Connect to event stream
+                connectToEventStream(data.session_id);
+            } else {
+                // Fallback for older API format
+                removeTypingIndicator();
+                if (data.answer) {
+                    addMessage(data.answer);
+                    updateVisualization(data);
+                } else {
+                    addMessage('Sorry, something went wrong. Please try again.');
+                }
+                hideProcessingIndicator();
             }
         } catch (error) {
             console.error('Error:', error);
             removeTypingIndicator();
+            hideProcessingIndicator();
             addMessage('Sorry, something went wrong. Please try again later.');
         }
     });
@@ -595,8 +805,6 @@
         
         // Update decomposition view
         if (data.decomposition) {
-            questionAnalysis.textContent = data.decomposition.analysis || 'No analysis available';
-            
             // Update sub-questions
             subQuestionsList.innerHTML = '';
             if (data.decomposition.sub_questions && data.decomposition.sub_questions.length > 0) {

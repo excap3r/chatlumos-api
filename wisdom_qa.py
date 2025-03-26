@@ -283,7 +283,7 @@ def batch_search_pinecone(queries: List[str], index_name: str = DEFAULT_INDEX, t
 
 # ----------------- Answer Generation -----------------
 
-def generate_answer(question: str, retrieved_data: Dict[str, List[Dict]], api_key: str = None) -> str:
+def generate_answer(question: str, retrieved_data: Dict[str, List[Dict]], api_key: str = None, ensure_relevance: bool = False) -> str:
     """
     Generate an answer based on retrieved data.
     
@@ -291,6 +291,7 @@ def generate_answer(question: str, retrieved_data: Dict[str, List[Dict]], api_ke
         question: The original question
         retrieved_data: Dictionary of search queries and their results
         api_key: DeepSeek API key (optional)
+        ensure_relevance: If True, emphasize strict relevance to the user's specific question
         
     Returns:
         Generated answer
@@ -340,7 +341,16 @@ def generate_answer(question: str, retrieved_data: Dict[str, List[Dict]], api_ke
         return "I don't have enough information to answer this question based on the available knowledge."
     
     # Create the system prompt
-    system_prompt = """
+    relevance_instructions = ""
+    if ensure_relevance:
+        relevance_instructions = """
+    8. IMPORTANT: Only include information that is directly relevant to answering the specific question asked
+    9. Do not include tangential information or context that doesn't directly address the user's specific question
+    10. Filter out any information that seems only loosely related to the question's core intent
+    11. Focus on providing a precise answer to exactly what was asked, nothing more
+    """
+    
+    system_prompt = f"""
     You are a knowledgeable assistant that answers questions based ONLY on the provided context information.
     Follow these guidelines:
     1. Only use information explicitly stated in the context
@@ -349,7 +359,7 @@ def generate_answer(question: str, retrieved_data: Dict[str, List[Dict]], api_ke
     4. Do not introduce information beyond what's provided in the context
     5. Answer in a clear, concise, and well-structured format
     6. Make responses personal and friendly, avoiding technical language when possible
-    7. DO NOT include any meta-instructions or notes about how to structure your response in your final answer
+    7. DO NOT include any meta-instructions or notes about how to structure your response in your final answer{relevance_instructions}
     """
     
     # Create the user prompt

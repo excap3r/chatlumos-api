@@ -9,7 +9,12 @@ visualizing vector database searches, and displaying answers in a clean UI.
 import os
 import traceback
 import langid
-from flask import Flask, render_template, request, jsonify
+import time
+import json
+import uuid
+import threading
+from queue import Queue
+from flask import Flask, render_template, request, jsonify, Response, stream_with_context
 from flask_cors import CORS
 import numpy as np
 from dotenv import load_dotenv
@@ -40,6 +45,9 @@ CORS(app)
 DEFAULT_MODEL = "all-MiniLM-L6-v2"
 DEFAULT_INDEX = "wisdom-embeddings"
 DEFAULT_TOP_K = 10
+
+# Progress event storage - maps session IDs to event queues
+progress_events = {}
 
 # Initialize services
 pinecone_initialized = False
@@ -151,25 +159,74 @@ def health_check():
             "error_message": str(e)
         }), 500
 
-@app.route('/api/ask', methods=['POST'])
-def ask_question():
-    """API endpoint to process questions."""
+@app.route('/api/progress-stream/<session_id>')
+def progress_stream(session_id):
+    """
+    Server-Sent Events endpoint to stream question processing progress.
+    
+    This endpoint streams real-time updates about the processing stages
+    of a question being answered.
+    """
+    if session_id not in progress_events:
+        return jsonify({"error": "Invalid or expired session ID"}), 404
+    
+    def generate_events():
+        event_queue = progress_events[session_id]
+        try:
+            # Send initial event
+            yield 'data: {"event": "connected", "message": "Connected to progress stream"}\n\n'
+            
+            # Listen for events until completion or timeout
+            timeout = time.time() + 300  # 5 minute timeout
+            while time.time() < timeout:
+                try:
+                    # Non-blocking get with timeout
+                    event = event_queue.get(timeout=1.0)
+                    if event is None:  # None signals end of stream
+                        yield 'data: {"event": "complete", "message": "Processing complete"}\n\n'
+                        break
+                    
+                    if isinstance(event, dict):
+                        event_json = json.dumps(event)
+                        yield f'data: {event_json}\n\n'
+                except Exception as e:
+                    # Queue.Empty exception or other error, just continue
+                    continue
+                    
+            # Send end event
+            yield 'data: {"event": "end", "message": "Stream ended"}\n\n'
+            
+            # Clean up
+            if session_id in progress_events:
+                del progress_events[session_id]
+                
+        except GeneratorExit:
+            # Client disconnected
+            if session_id in progress_events:
+                del progress_events[session_id]
+    
+    return Response(stream_with_context(generate_events()),
+                   mimetype='text/event-stream',
+                   headers={
+                       'Cache-Control': 'no-cache',
+                       'X-Accel-Buffering': 'no',  # For Nginx
+                       'Connection': 'keep-alive'
+                   })
+
+def process_question_async(question, session_id):
+    """
+    Process a question asynchronously, sending progress updates.
+    
+    Args:
+        question: The question to process
+        session_id: The session ID for tracking progress
+    """
+    event_queue = progress_events.get(session_id)
+    if not event_queue:
+        return
+    
     try:
-        if not initialize_services():
-            return jsonify({
-                "error": f"Services not initialized correctly: {initialization_error}"
-            }), 500
-        
-        # Get question from request
-        data = request.json
-        question = data.get('question', '')
-        
-        if not question.strip():
-            return jsonify({
-                "error": "Question cannot be empty"
-            }), 400
-        
-        # Process steps to track and visualize
+        # Initialize process steps
         process_steps = [
             {"id": "language", "name": "Language Detection", "status": "pending", "details": None},
             {"id": "translation", "name": "Translation", "status": "pending", "details": None},
@@ -179,38 +236,101 @@ def ask_question():
             {"id": "translation_back", "name": "Translation to User Language", "status": "pending", "details": None}
         ]
         
+        # Send initial process steps
+        event_queue.put({
+            "event": "process_init",
+            "process_steps": process_steps,
+            "progress": 0
+        })
+        
+        # Calculate progress increment per step
+        progress_increment = 100.0 / len(process_steps)
+        current_progress = 0
+        
+        # Track result data
+        result_data = {
+            "status": "processing",
+            "original_language": "en"
+        }
+        
         # Detect language
-        process_steps[0]["status"] = "processing"
+        event_queue.put({
+            "event": "step_update",
+            "step_id": "language",
+            "status": "processing"
+        })
+        
         lang, confidence = detect_language(question)
         original_language = lang
-        process_steps[0]["status"] = "completed"
-        process_steps[0]["details"] = {"language": lang, "confidence": confidence}
+        result_data["original_language"] = original_language
+        
+        event_queue.put({
+            "event": "step_update",
+            "step_id": "language",
+            "status": "completed",
+            "details": {"language": lang, "confidence": float(confidence)}
+        })
+        current_progress += progress_increment
+        event_queue.put({"event": "progress", "value": current_progress})
         
         # Translate if not English
         translated_question = question
+        event_queue.put({
+            "event": "step_update",
+            "step_id": "translation",
+            "status": "processing"
+        })
+        
         if lang != "en" and os.getenv("DEEPSEEK_API_KEY"):
-            process_steps[1]["status"] = "processing"
             translation_result = translate_text(question, "en", lang)
             
             if "error" not in translation_result:
                 translated_question = translation_result["translated_text"]
-                process_steps[1]["status"] = "completed"
-                process_steps[1]["details"] = {
-                    "original": question, 
-                    "translated": translated_question
-                }
+                event_queue.put({
+                    "event": "step_update",
+                    "step_id": "translation",
+                    "status": "completed",
+                    "details": {
+                        "original": question, 
+                        "translated": translated_question
+                    }
+                })
             else:
-                process_steps[1]["status"] = "error"
-                process_steps[1]["details"] = {"error": translation_result["error"]}
+                event_queue.put({
+                    "event": "step_update",
+                    "step_id": "translation",
+                    "status": "error",
+                    "details": {"error": translation_result["error"]}
+                })
         else:
-            process_steps[1]["status"] = "skipped"
-            process_steps[1]["details"] = {"reason": "Language is English or translation API not available"}
+            event_queue.put({
+                "event": "step_update",
+                "step_id": "translation",
+                "status": "skipped",
+                "details": {"reason": "Language is English or translation API not available"}
+            })
+        
+        current_progress += progress_increment
+        event_queue.put({"event": "progress", "value": current_progress})
         
         # Decompose the question
-        process_steps[2]["status"] = "processing"
+        event_queue.put({
+            "event": "step_update",
+            "step_id": "decomposition",
+            "status": "processing"
+        })
+        
         decomposition = decompose_question(translated_question)
-        process_steps[2]["status"] = "completed"
-        process_steps[2]["details"] = decomposition
+        result_data["decomposition"] = decomposition
+        
+        event_queue.put({
+            "event": "step_update",
+            "step_id": "decomposition",
+            "status": "completed",
+            "details": decomposition
+        })
+        current_progress += progress_increment
+        event_queue.put({"event": "progress", "value": current_progress})
         
         # Prepare search queries
         all_queries = []
@@ -228,32 +348,82 @@ def ask_question():
                 seen.add(q)
         
         # Search for all queries
-        process_steps[3]["status"] = "processing"
+        event_queue.put({
+            "event": "step_update",
+            "step_id": "search",
+            "status": "processing"
+        })
+        
         search_results = batch_search_pinecone(unique_queries, DEFAULT_INDEX, DEFAULT_TOP_K)
-        process_steps[3]["status"] = "completed"
-        process_steps[3]["details"] = {"query_count": len(unique_queries), "result_count": sum(len(results) for results in search_results.values())}
+        
+        event_queue.put({
+            "event": "step_update",
+            "step_id": "search",
+            "status": "completed",
+            "details": {"query_count": len(unique_queries), "result_count": sum(len(results) for results in search_results.values())}
+        })
+        current_progress += progress_increment
+        event_queue.put({"event": "progress", "value": current_progress})
         
         # Generate answer
-        process_steps[4]["status"] = "processing"
-        answer = generate_answer(translated_question, search_results)
-        process_steps[4]["status"] = "completed"
-        process_steps[4]["details"] = {"length": len(answer)}
+        event_queue.put({
+            "event": "step_update",
+            "step_id": "answer",
+            "status": "processing"
+        })
+        
+        answer = generate_answer(
+            translated_question, 
+            search_results,
+            ensure_relevance=True
+        )
+        result_data["answer"] = answer
+        
+        event_queue.put({
+            "event": "step_update",
+            "step_id": "answer",
+            "status": "completed",
+            "details": {"length": len(answer)}
+        })
+        current_progress += progress_increment
+        event_queue.put({"event": "progress", "value": current_progress})
         
         # Translate answer back if needed
+        event_queue.put({
+            "event": "step_update",
+            "step_id": "translation_back",
+            "status": "processing" 
+        })
+        
         if lang != "en" and os.getenv("DEEPSEEK_API_KEY"):
-            process_steps[5]["status"] = "processing"
             back_translation = translate_text(answer, lang, "en")
             
             if "error" not in back_translation:
                 answer = back_translation["translated_text"]
-                process_steps[5]["status"] = "completed" 
-                process_steps[5]["details"] = {"translated_to": lang}
+                result_data["answer"] = answer
+                event_queue.put({
+                    "event": "step_update",
+                    "step_id": "translation_back",
+                    "status": "completed",
+                    "details": {"translated_to": lang}
+                })
             else:
-                process_steps[5]["status"] = "error"
-                process_steps[5]["details"] = {"error": back_translation["error"]}
+                event_queue.put({
+                    "event": "step_update",
+                    "step_id": "translation_back",
+                    "status": "error",
+                    "details": {"error": back_translation["error"]}
+                })
         else:
-            process_steps[5]["status"] = "skipped"
-            process_steps[5]["details"] = {"reason": "Language is English or translation API not available"}
+            event_queue.put({
+                "event": "step_update",
+                "step_id": "translation_back",
+                "status": "skipped",
+                "details": {"reason": "Language is English or translation API not available"}
+            })
+        
+        current_progress = 100  # Set to 100% when complete
+        event_queue.put({"event": "progress", "value": current_progress})
         
         # Process search results for visualization
         viz_data = []
@@ -292,14 +462,66 @@ def ask_question():
                 "results": query_results
             })
         
-        # Return response with visualization data and process steps
+        result_data["visualization"] = viz_data
+        result_data["status"] = "success"
+        
+        # Send final result data
+        event_queue.put({
+            "event": "result",
+            "data": result_data
+        })
+        
+        # Signal end of stream
+        event_queue.put(None)
+        
+    except Exception as e:
+        error_traceback = traceback.format_exc()
+        print(f"Error in async processing: {str(e)}\n{error_traceback}")
+        
+        # Send error event
+        event_queue.put({
+            "event": "error",
+            "error": str(e)
+        })
+        
+        # Signal end of stream
+        event_queue.put(None)
+
+@app.route('/api/ask', methods=['POST'])
+def ask_question():
+    """API endpoint to process questions."""
+    try:
+        if not initialize_services():
+            return jsonify({
+                "error": f"Services not initialized correctly: {initialization_error}"
+            }), 500
+        
+        # Get question from request
+        data = request.json
+        question = data.get('question', '')
+        
+        if not question.strip():
+            return jsonify({
+                "error": "Question cannot be empty"
+            }), 400
+        
+        # Generate a session ID for tracking progress
+        session_id = str(uuid.uuid4())
+        
+        # Create a queue for progress events
+        progress_events[session_id] = Queue()
+        
+        # Start processing in a background thread
+        threading.Thread(
+            target=process_question_async,
+            args=(question, session_id),
+            daemon=True
+        ).start()
+        
+        # Return the session ID for clients to connect to progress stream
         return jsonify({
-            "status": "success",
-            "decomposition": decomposition,
-            "answer": answer,
-            "visualization": viz_data,
-            "process": process_steps,
-            "original_language": original_language
+            "status": "processing",
+            "session_id": session_id
         })
         
     except Exception as e:
