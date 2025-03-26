@@ -50,7 +50,8 @@ DEFAULT_TOP_K = 10                   # Default number of results to retrieve
 
 def query_deepseek(prompt: str, system_prompt: str = None, api_key: str = None, 
                   max_tokens: int = 2000, timeout: int = 30, 
-                  retries: int = 2, task_type: str = "general") -> Dict[str, Any]:
+                  retries: int = 2, task_type: str = "general", 
+                  stream: bool = False, stream_callback = None) -> Dict[str, Any]:
     """
     Query the DeepSeek API with a prompt.
     
@@ -62,6 +63,8 @@ def query_deepseek(prompt: str, system_prompt: str = None, api_key: str = None,
         timeout: Request timeout in seconds (default 30)
         retries: Number of retry attempts (default 2)
         task_type: Task type for optimal parameter settings ("general", "translation", etc.)
+        stream: Whether to stream the response (default False)
+        stream_callback: Callback function to receive streamed chunks (required if stream=True)
     
     Returns:
         Dictionary with response content or error
@@ -70,6 +73,10 @@ def query_deepseek(prompt: str, system_prompt: str = None, api_key: str = None,
         api_key = os.getenv("DEEPSEEK_API_KEY")
         if not api_key:
             return {"error": "No DeepSeek API key provided"}
+    
+    # Validate stream parameters
+    if stream and stream_callback is None:
+        return {"error": "stream_callback must be provided when stream=True"}
     
     DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
     
@@ -97,7 +104,8 @@ def query_deepseek(prompt: str, system_prompt: str = None, api_key: str = None,
         "model": "deepseek-chat",
         "messages": messages,
         "temperature": temperature,
-        "max_tokens": actual_max_tokens
+        "max_tokens": actual_max_tokens,
+        "stream": stream  # Add stream parameter to the API request
     }
     
     # Initialize retry backoff
@@ -109,44 +117,115 @@ def query_deepseek(prompt: str, system_prompt: str = None, api_key: str = None,
         attempts += 1
         try:
             print(f"DeepSeek API call attempt {attempts}/{max_attempts} for {task_type} task...")
-            response = requests.post(
-                DEEPSEEK_API_URL, 
-                headers=headers, 
-                json=data, 
-                timeout=timeout  # Set timeout for the request
-            )
             
-            if response.status_code == 200:
-                result = response.json()
-                content = result["choices"][0]["message"]["content"]
-                return {"content": content}
-            elif response.status_code == 429:
-                # Rate limit error - always retry with backoff
-                print(f"DeepSeek API rate limit error (429). Backing off for {backoff} seconds...")
-                time.sleep(backoff)
-                backoff *= 2  # Exponential backoff
-                continue
+            # Handle streaming or non-streaming responses differently
+            if stream:
+                # Streaming response
+                with requests.post(
+                    DEEPSEEK_API_URL,
+                    headers=headers,
+                    json=data,
+                    stream=True,
+                    timeout=timeout
+                ) as response:
+                    # Check for error in initial response
+                    if response.status_code != 200:
+                        error_msg = f"API stream request failed with status {response.status_code}"
+                        try:
+                            error_details = response.json()
+                            error_msg += f": {error_details}"
+                        except:
+                            error_msg += f": {response.text}"
+                        
+                        print(f"DeepSeek API streaming error: {error_msg}")
+                        
+                        # Only retry server errors (5xx)
+                        if response.status_code >= 500 and attempts < max_attempts:
+                            print(f"Retrying stream in {backoff} seconds...")
+                            time.sleep(backoff)
+                            backoff *= 2  # Exponential backoff
+                            continue
+                        
+                        return {
+                            "error": error_msg,
+                            "details": response.text
+                        }
+                    
+                    # Process the stream
+                    full_content = ""
+                    
+                    # Process each chunk of streaming data
+                    for line in response.iter_lines():
+                        if line:
+                            # Skip empty lines and SSE comments
+                            line_text = line.decode('utf-8')
+                            if line_text.startswith('data: '):
+                                # Extract the JSON data
+                                json_data = line_text[6:]  # Remove 'data: ' prefix
+                                
+                                # Skip the '[DONE]' message
+                                if json_data.strip() == "[DONE]":
+                                    continue
+                                
+                                try:
+                                    chunk_data = json.loads(json_data)
+                                    # Extract content delta
+                                    delta = chunk_data.get('choices', [{}])[0].get('delta', {})
+                                    content_chunk = delta.get('content', '')
+                                    
+                                    if content_chunk:
+                                        # Accumulate the full content
+                                        full_content += content_chunk
+                                        
+                                        # Call the callback with the chunk
+                                        stream_callback(content_chunk)
+                                except json.JSONDecodeError:
+                                    print(f"Failed to decode JSON from stream: {json_data}")
+                                except Exception as e:
+                                    print(f"Error processing stream chunk: {e}")
+                    
+                    # Return the full content after stream is complete
+                    return {"content": full_content}
             else:
-                error_msg = f"API request failed with status {response.status_code}"
-                try:
-                    error_details = response.json()
-                    error_msg += f": {error_details}"
-                except:
-                    error_msg += f": {response.text}"
+                # Non-streaming response (original behavior)
+                response = requests.post(
+                    DEEPSEEK_API_URL, 
+                    headers=headers, 
+                    json=data, 
+                    timeout=timeout
+                )
                 
-                print(f"DeepSeek API error: {error_msg}")
-                
-                # Only retry server errors (5xx)
-                if response.status_code >= 500 and attempts < max_attempts:
-                    print(f"Retrying in {backoff} seconds...")
+                if response.status_code == 200:
+                    result = response.json()
+                    content = result["choices"][0]["message"]["content"]
+                    return {"content": content}
+                elif response.status_code == 429:
+                    # Rate limit error - always retry with backoff
+                    print(f"DeepSeek API rate limit error (429). Backing off for {backoff} seconds...")
                     time.sleep(backoff)
                     backoff *= 2  # Exponential backoff
                     continue
-                
-                return {
-                    "error": error_msg,
-                    "details": response.text
-                }
+                else:
+                    error_msg = f"API request failed with status {response.status_code}"
+                    try:
+                        error_details = response.json()
+                        error_msg += f": {error_details}"
+                    except:
+                        error_msg += f": {response.text}"
+                    
+                    print(f"DeepSeek API error: {error_msg}")
+                    
+                    # Only retry server errors (5xx)
+                    if response.status_code >= 500 and attempts < max_attempts:
+                        print(f"Retrying in {backoff} seconds...")
+                        time.sleep(backoff)
+                        backoff *= 2  # Exponential backoff
+                        continue
+                    
+                    return {
+                        "error": error_msg,
+                        "details": response.text
+                    }
         except requests.exceptions.Timeout:
             if attempts < max_attempts:
                 print(f"DeepSeek API timeout after {timeout} seconds. Retrying in {backoff} seconds...")
@@ -458,7 +537,9 @@ def batch_search_pinecone(queries: List[str], index_name: str = DEFAULT_INDEX, t
 
 # ----------------- Answer Generation -----------------
 
-def generate_answer(question: str, retrieved_data: Dict[str, List[Dict]], api_key: str = None, ensure_relevance: bool = False, target_language: str = "en") -> str:
+def generate_answer(question: str, retrieved_data: Dict[str, List[Dict]], api_key: str = None, 
+                   ensure_relevance: bool = False, target_language: str = "en", 
+                   stream: bool = False, stream_callback = None) -> str:
     """
     Generate an answer based on retrieved data.
     
@@ -468,6 +549,8 @@ def generate_answer(question: str, retrieved_data: Dict[str, List[Dict]], api_ke
         api_key: DeepSeek API key (optional)
         ensure_relevance: If True, emphasize strict relevance to the user's specific question
         target_language: Language code to generate the answer in (default: "en")
+        stream: Whether to stream the response (default False)
+        stream_callback: Callback function to receive streamed chunks
         
     Returns:
         Generated answer
@@ -565,6 +648,9 @@ def generate_answer(question: str, retrieved_data: Dict[str, List[Dict]], api_ke
     {full_context}
     """
     
+    # Prepare streaming parameters if needed
+    actual_stream = stream and stream_callback is not None
+    
     # Query the LLM for an answer with appropriate parameters for a complete answer
     response = query_deepseek(
         user_prompt, 
@@ -573,7 +659,9 @@ def generate_answer(question: str, retrieved_data: Dict[str, List[Dict]], api_ke
         max_tokens=2000,  # Keep max_tokens high for comprehensive answers
         timeout=60,       # Use longer timeout for this complex task
         retries=2,        # Two retries are reasonable here
-        task_type="answer_generation"
+        task_type="answer_generation",
+        stream=actual_stream,
+        stream_callback=stream_callback
     )
     
     if "error" in response:

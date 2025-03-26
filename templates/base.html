@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="en" class="light">
+<html lang="en" class="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{% block title %}PDF Wisdom Extractor{% endblock %}</title>
+    <title>{% block title %}PDF Wisdom{% endblock %}</title>
     
     <!-- Tailwind CSS CDN -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -15,7 +15,32 @@
             theme: {
                 extend: {
                     colors: {
+                        grok: {
+                            50: '#f9fafb',
+                            100: '#f3f4f6', 
+                            200: '#e5e7eb',
+                            300: '#d1d5db',
+                            400: '#9ca3af',
+                            500: '#6b7280',
+                            600: '#4b5563',
+                            700: '#374151',
+                            800: '#1f2937',
+                            900: '#111827',
+                            950: '#0a0c12',
+                        },
                         primary: {
+                            50: '#ecfdf5',
+                            100: '#d1fae5',
+                            200: '#a7f3d0',
+                            300: '#6ee7b7',
+                            400: '#34d399',
+                            500: '#10b981',
+                            600: '#059669',
+                            700: '#047857',
+                            800: '#065f46',
+                            900: '#064e3b',
+                        },
+                        accent: {
                             50: '#f0f9ff',
                             100: '#e0f2fe',
                             200: '#bae6fd',
@@ -23,44 +48,24 @@
                             400: '#38bdf8',
                             500: '#0ea5e9',
                             600: '#0284c7',
-                            700: '#0369a1',
+                            700: '#0369a1', 
                             800: '#075985',
                             900: '#0c4a6e',
-                        },
-                        secondary: {
-                            50: '#f8fafc',
-                            100: '#f1f5f9',
-                            200: '#e2e8f0',
-                            300: '#cbd5e1',
-                            400: '#94a3b8',
-                            500: '#64748b',
-                            600: '#475569',
-                            700: '#334155',
-                            800: '#1e293b',
-                            900: '#0f172a',
-                        },
-                        accent: {
-                            400: '#c084fc',
-                            500: '#a855f7',
-                            600: '#9333ea',
-                        },
-                        dark: {
-                            100: '#1e293b',
-                            200: '#1a2334',
-                            300: '#151d2a',
-                            400: '#111827',
-                            500: '#0f172a',
-                            600: '#0b1120',
                         }
                     },
                     fontFamily: {
-                        sans: ['Inter', 'sans-serif'],
+                        sans: ['Inter', 'system-ui', 'sans-serif'],
                         mono: ['JetBrains Mono', 'monospace']
                     },
                     boxShadow: {
                         'soft': '0 2px 15px -3px rgba(0, 0, 0, 0.07), 0 10px 20px -2px rgba(0, 0, 0, 0.04)',
-                        'glow': '0 0 15px rgba(14, 165, 233, 0.5)',
-                        'dark-glow': '0 0 15px rgba(14, 165, 233, 0.3)',
+                        'glow': '0 0 15px rgba(56, 189, 248, 0.3)',
+                    },
+                    animation: {
+                        'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+                    },
+                    backgroundImage: {
+                        'gradient-radial': 'radial-gradient(var(--tw-gradient-stops))',
                     }
                 }
             }
@@ -70,65 +75,34 @@
     <!-- Font imports -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-    
-    <!-- Plotly.js for visualizations -->
-    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
     
     <!-- Custom CSS -->
     <style>
-        /* Custom scrollbar - Light mode */
-        .light ::-webkit-scrollbar {
-            width: 8px;
-            height: 8px;
+        /* Custom scrollbar */
+        ::-webkit-scrollbar {
+            width: 4px;
+            height: 4px;
         }
         
-        .light ::-webkit-scrollbar-track {
-            background: #f1f5f9;
-            border-radius: 10px;
+        ::-webkit-scrollbar-track {
+            background: transparent;
         }
         
-        .light ::-webkit-scrollbar-thumb {
-            background: #cbd5e1;
-            border-radius: 10px;
+        ::-webkit-scrollbar-thumb {
+            background: #4b5563;
+            border-radius: 4px;
         }
         
-        .light ::-webkit-scrollbar-thumb:hover {
-            background: #94a3b8;
+        ::-webkit-scrollbar-thumb:hover {
+            background: #6b7280;
         }
         
-        /* Custom scrollbar - Dark mode */
-        .dark ::-webkit-scrollbar {
-            width: 8px;
-            height: 8px;
-        }
-        
-        .dark ::-webkit-scrollbar-track {
-            background: #1e293b;
-            border-radius: 10px;
-        }
-        
-        .dark ::-webkit-scrollbar-thumb {
-            background: #475569;
-            border-radius: 10px;
-        }
-        
-        .dark ::-webkit-scrollbar-thumb:hover {
-            background: #64748b;
-        }
-        
-        /* Simple animations */
-        .fade-in {
-            animation: fadeIn 0.5s ease-in-out;
-        }
-        
+        /* Animations */
         @keyframes fadeIn {
             from { opacity: 0; }
             to { opacity: 1; }
-        }
-        
-        .slide-in {
-            animation: slideIn 0.3s ease-out;
         }
         
         @keyframes slideIn {
@@ -136,251 +110,125 @@
             to { transform: translateY(0); opacity: 1; }
         }
         
-        /* Pulse animation */
-        .pulse {
-            animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
-        }
-        
         @keyframes pulse {
             0%, 100% { opacity: 1; }
             50% { opacity: 0.5; }
         }
         
-        /* Shimmer effect */
-        .shimmer {
-            background-image: linear-gradient(
-                90deg,
-                rgba(255, 255, 255, 0) 0%,
-                rgba(255, 255, 255, 0.2) 20%,
-                rgba(255, 255, 255, 0.5) 60%,
-                rgba(255, 255, 255, 0) 100%
-            );
-            background-size: 200% 100%;
-            background-position: -100% 0;
-            animation: shimmer 2s infinite;
+        .animate-fade-in {
+            animation: fadeIn 0.5s ease-out forwards;
         }
         
-        .dark .shimmer {
-            background-image: linear-gradient(
-                90deg,
-                rgba(30, 41, 59, 0) 0%,
-                rgba(30, 41, 59, 0.3) 20%,
-                rgba(30, 41, 59, 0.6) 60%,
-                rgba(30, 41, 59, 0) 100%
-            );
-        }
-        
-        @keyframes shimmer {
-            0% { background-position: -100% 0; }
-            100% { background-position: 200% 0; }
+        .animate-slide-in {
+            animation: slideIn 0.3s ease-out forwards;
         }
         
         /* Typing indicator animation */
-        .typing-indicator {
-            display: inline-flex;
-            align-items: center;
+        .typing-dot {
+            animation: pulse 1.5s infinite;
         }
         
-        .typing-indicator span {
-            height: 8px;
-            width: 8px;
-            background-color: #94a3b8;
-            border-radius: 50%;
-            display: inline-block;
-            margin: 0 2px;
-            opacity: 0.6;
+        .typing-dot:nth-child(1) {
+            animation-delay: 0s;
         }
         
-        .dark .typing-indicator span {
-            background-color: #64748b;
+        .typing-dot:nth-child(2) {
+            animation-delay: 0.2s;
         }
         
-        .typing-indicator span:nth-child(1) {
-            animation: bounce 1s infinite 0.1s;
+        .typing-dot:nth-child(3) {
+            animation-delay: 0.4s;
         }
         
-        .typing-indicator span:nth-child(2) {
-            animation: bounce 1s infinite 0.3s;
+        /* Message transitions */
+        .message-transition {
+            transition: all 0.2s ease;
         }
         
-        .typing-indicator span:nth-child(3) {
-            animation: bounce 1s infinite 0.5s;
+        .message-transition:hover {
+            transform: translateY(-1px);
         }
         
-        @keyframes bounce {
-            0%, 80%, 100% { transform: translateY(0); }
-            40% { transform: translateY(-5px); }
-        }
-        
-        /* Process animation */
-        .process-step {
-            transition: all 0.3s ease;
-        }
-        
-        .process-step.active {
-            border-color: #0ea5e9;
-            box-shadow: 0 0 10px rgba(14, 165, 233, 0.3);
-        }
-        
-        .dark .process-step.active {
-            box-shadow: 0 0 10px rgba(14, 165, 233, 0.2);
-        }
-        
-        /* Progress bar animation */
-        .progress-bar {
-            height: 4px;
-            width: 0%;
-            background: linear-gradient(90deg, #0ea5e9, #a855f7);
-            border-radius: 2px;
-            transition: width 0.3s ease;
-        }
-        
-        /* Animated gradient borders */
-        .gradient-border {
-            position: relative;
-            border-radius: 10px;
-            overflow: hidden;
-        }
-        
-        .gradient-border::before {
-            content: '';
-            position: absolute;
-            top: -2px;
-            left: -2px;
-            right: -2px;
-            bottom: -2px;
-            z-index: -1;
-            background: linear-gradient(45deg, #0ea5e9, #a855f7, #0ea5e9);
-            background-size: 400% 400%;
-            animation: gradientBorder 3s ease infinite;
-            border-radius: 12px;
-        }
-        
-        @keyframes gradientBorder {
-            0% { background-position: 0% 50%; }
-            50% { background-position: 100% 50%; }
-            100% { background-position: 0% 50%; }
-        }
-        
-        /* Tooltip styles */
-        .tooltip {
-            position: relative;
-        }
-        
-        .tooltip .tooltip-text {
-            visibility: hidden;
-            width: 200px;
-            background-color: #1e293b;
-            color: #fff;
-            text-align: center;
-            border-radius: 6px;
-            padding: 5px;
-            position: absolute;
-            z-index: 1;
-            bottom: 125%;
-            left: 50%;
-            margin-left: -100px;
-            opacity: 0;
-            transition: opacity 0.3s;
-        }
-        
-        .tooltip:hover .tooltip-text {
-            visibility: visible;
-            opacity: 1;
-        }
-        
-        /* Dark mode transition */
-        .transition-colors {
-            transition-property: background-color, border-color, color, fill, stroke;
-            transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
-            transition-duration: 300ms;
-        }
-        
-        /* Fade in animation for page elements */
-        body {
-            opacity: 0;
-            animation: bodyFadeIn 0.5s ease-out forwards;
-            animation-delay: 0.1s;
-        }
-        
-        @keyframes bodyFadeIn {
-            to { opacity: 1; }
+        /* Focus styles */
+        .focus-ring {
+            @apply outline-none ring-2 ring-accent-400 ring-opacity-50;
         }
     </style>
     
     {% block head %}{% endblock %}
 </head>
-<body class="bg-gray-50 text-secondary-800 dark:bg-dark-400 dark:text-gray-200 min-h-screen flex flex-col transition-colors">
-    <header class="bg-white dark:bg-dark-300 shadow-sm border-b border-gray-200 dark:border-dark-100 transition-colors">
-        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex justify-between items-center">
-            <div class="flex items-center space-x-3">
-                <svg xmlns="http://www.w3.org/2000/svg" class="h-8 w-8 text-primary-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+<body class="bg-grok-900 text-gray-300 min-h-screen flex flex-col transition-colors">
+    <header class="border-b border-grok-800">
+        <div class="max-w-6xl mx-auto px-4 py-3 flex justify-between items-center">
+            <div class="flex items-center space-x-2">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-primary-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                     <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path>
                     <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path>
                 </svg>
-                <h1 class="text-xl font-semibold text-secondary-900 dark:text-white">PDF Wisdom Extractor</h1>
+                <h1 class="text-lg font-semibold text-white">PDF Wisdom</h1>
             </div>
-            <nav class="flex items-center space-x-4">
-                <a href="/" class="text-primary-600 hover:text-primary-800 dark:text-primary-400 dark:hover:text-primary-300 px-3 py-2 rounded-md text-sm font-medium transition-colors">Home</a>
-                <a href="/about" class="text-secondary-600 hover:text-secondary-800 dark:text-gray-300 dark:hover:text-white px-3 py-2 rounded-md text-sm font-medium transition-colors">About</a>
+            
+            <!-- Theme toggle button -->
+            <button id="theme-toggle" class="p-2 rounded-full hover:bg-grok-800 focus:outline-none">
+                <!-- Sun icon for dark mode -->
+                <svg id="sun-icon" class="block h-5 w-5 text-yellow-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
+                </svg>
                 
-                <!-- Dark mode toggle button -->
-                <button id="theme-toggle" class="p-2 rounded-full hover:bg-gray-100 dark:hover:bg-dark-200 focus:outline-none focus:ring-2 focus:ring-primary-500 transition-colors">
-                    <!-- Sun icon for dark mode -->
-                    <svg id="sun-icon" class="hidden dark:block h-5 w-5 text-yellow-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
-                    </svg>
-                    
-                    <!-- Moon icon for light mode -->
-                    <svg id="moon-icon" class="block dark:hidden h-5 w-5 text-gray-700" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
-                    </svg>
-                </button>
-            </nav>
+                <!-- Moon icon for light mode -->
+                <svg id="moon-icon" class="hidden h-5 w-5 text-gray-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
+                </svg>
+            </button>
         </div>
     </header>
     
-    <main class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
+    <main class="flex-1 flex flex-col">
         {% block content %}{% endblock %}
     </main>
     
-    <footer class="bg-white dark:bg-dark-300 border-t border-gray-200 dark:border-dark-100 py-4 transition-colors">
-        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 text-center text-sm text-secondary-500 dark:text-gray-400">
-            <p>&copy; 2023 PDF Wisdom Extractor. All rights reserved.</p>
-        </div>
-    </footer>
-    
-    <!-- Dark mode JS -->
+    <!-- Theme JS -->
     <script>
-        // Check for saved theme preference or use user's system preference
+        // Handle theme toggle
         const themeToggleBtn = document.getElementById('theme-toggle');
+        const sunIcon = document.getElementById('sun-icon');
+        const moonIcon = document.getElementById('moon-icon');
         
         // Function to set theme
         function setTheme(isDark) {
             if (isDark) {
                 document.documentElement.classList.add('dark');
-                localStorage.theme = 'dark';
+                sunIcon.classList.remove('hidden');
+                sunIcon.classList.add('block');
+                moonIcon.classList.add('hidden');
+                moonIcon.classList.remove('block');
+                localStorage.setItem('theme', 'dark');
             } else {
                 document.documentElement.classList.remove('dark');
-                localStorage.theme = 'light';
+                sunIcon.classList.add('hidden');
+                sunIcon.classList.remove('block');
+                moonIcon.classList.remove('hidden');
+                moonIcon.classList.add('block');
+                localStorage.setItem('theme', 'light');
             }
         }
         
-        // Initial theme setup
-        if (localStorage.theme === 'dark' || (!('theme' in localStorage) && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
-            setTheme(true);
-        } else {
+        // Check for saved theme preference
+        const savedTheme = localStorage.getItem('theme');
+        if (savedTheme === 'light') {
             setTheme(false);
+        } else {
+            // Default to dark theme
+            setTheme(true);
         }
         
-        // Theme toggle handler
-        themeToggleBtn.addEventListener('click', function() {
+        // Toggle theme on button click
+        themeToggleBtn.addEventListener('click', () => {
             const isDark = document.documentElement.classList.contains('dark');
             setTheme(!isDark);
         });
     </script>
     
-    <!-- Custom JavaScript -->
     {% block scripts %}{% endblock %}
 </body>
-</html> 
+</html>

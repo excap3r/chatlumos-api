@@ -230,9 +230,9 @@ def process_question_async(question, session_id):
     try:
         # Initialize process steps - removing language detection and separate translation steps
         process_steps = [
-            {"id": "decomposition", "name": "Question Analysis & Translation", "status": "pending", "details": None},
-            {"id": "search", "name": "Vector Search", "status": "pending", "details": None},
-            {"id": "answer", "name": "Answer Generation", "status": "pending", "details": None}
+            {"id": "decompose", "name": "Analyzing question", "status": "pending", "details": None},
+            {"id": "search", "name": "Searching knowledge base", "status": "pending", "details": None},
+            {"id": "answer", "name": "Generating answer", "status": "pending", "details": None}
         ]
         
         # Send initial process steps
@@ -258,7 +258,7 @@ def process_question_async(question, session_id):
         # Process question for decomposition and translation
         event_queue.put({
             "event": "step_update",
-            "step_id": "decomposition",
+            "step_id": "decompose",
             "status": "processing"
         })
         
@@ -277,7 +277,7 @@ def process_question_async(question, session_id):
         
         event_queue.put({
             "event": "step_update",
-            "step_id": "decomposition",
+            "step_id": "decompose",
             "status": "completed",
             "details": decomposition
         })
@@ -331,20 +331,48 @@ def process_question_async(question, session_id):
             "status": "processing"
         })
         
+        # Create a callback function for streaming answer chunks
+        def stream_chunk_callback(chunk):
+            # Send the chunk to the client
+            if chunk:
+                event_queue.put({
+                    "event": "answer_chunk",
+                    "text": chunk
+                })
+                # Tiny sleep to allow event processing
+                time.sleep(0.01)
+        
+        # Track the answer for result_data
+        streamed_answer = ""
+        
+        # Define a wrapper callback that also accumulates the answer
+        def accumulate_stream_callback(chunk):
+            nonlocal streamed_answer
+            streamed_answer += chunk
+            stream_chunk_callback(chunk)
+        
         # Generate answer with the original question and include language info
         answer = generate_answer(
             original_question, 
             search_results,
             ensure_relevance=True,
-            target_language=detected_language  # Pass target language to generate answer in user's language
+            target_language=detected_language,  # Pass target language to generate answer in user's language
+            stream=True,  # Enable streaming
+            stream_callback=accumulate_stream_callback  # Pass the callback
         )
-        result_data["answer"] = answer
+        
+        # In case streaming failed or wasn't used, use the returned answer
+        if not streamed_answer and answer:
+            result_data["answer"] = answer
+        else:
+            # Use the accumulated streamed answer
+            result_data["answer"] = streamed_answer
         
         event_queue.put({
             "event": "step_update",
             "step_id": "answer",
             "status": "completed",
-            "details": {"length": len(answer)}
+            "details": {"length": len(result_data["answer"])}
         })
         current_progress += progress_increment
         event_queue.put({"event": "progress", "value": current_progress})

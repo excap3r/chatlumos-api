@@ -1,603 +1,77 @@
 {% extends "base.html" %}
 
-{% block title %}PDF Wisdom Chatbot{% endblock %}
-
-{% block head %}
-<style>
-    /* Message styles */
-    .message {
-        max-width: 85%;
-        padding: 12px 16px;
-        border-radius: 14px;
-        margin-bottom: 12px;
-        transition: all 0.3s ease;
-        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
-        transform-origin: left bottom;
-        animation: messageAppear 0.3s ease-out forwards;
-    }
-    
-    @keyframes messageAppear {
-        from {
-            opacity: 0;
-            transform: translateY(10px) scale(0.97);
-        }
-        to {
-            opacity: 1;
-            transform: translateY(0) scale(1);
-        }
-    }
-    
-    .user-message {
-        background-color: #e0f2fe;
-        border: 1px solid #bae6fd;
-        margin-left: auto;
-        border-bottom-right-radius: 4px;
-        transform-origin: right bottom;
-        background-image: linear-gradient(120deg, #e0f2fe, #dbeafe);
-    }
-    
-    .bot-message {
-        background-color: white;
-        border: 1px solid #e2e8f0;
-        margin-right: auto;
-        border-bottom-left-radius: 4px;
-    }
-    
-    .dark .user-message {
-        background-color: #1e40af;
-        border: 1px solid #1e3a8a;
-        color: #f1f5f9;
-        background-image: linear-gradient(120deg, #1e40af, #2563eb);
-    }
-    
-    .dark .bot-message {
-        background-color: #1e293b;
-        border: 1px solid #334155;
-        color: #f8fafc;
-    }
-    
-    /* Visualization panel */
-    .visualization-panel {
-        transition: max-height 0.3s ease, opacity 0.3s ease;
-        max-height: 0;
-        opacity: 0;
-        overflow: hidden;
-    }
-    
-    .visualization-panel.active {
-        max-height: 600px;
-        opacity: 1;
-    }
-    
-    /* Process steps */
-    .process-step {
-        position: relative;
-        padding-left: 30px;
-        margin-bottom: 12px;
-        transition: all 0.3s ease;
-    }
-    
-    .process-step::before {
-        content: '';
-        position: absolute;
-        left: 10px;
-        top: 0;
-        height: 100%;
-        width: 2px;
-        background-color: #e2e8f0;
-    }
-    
-    .dark .process-step::before {
-        background-color: #334155;
-    }
-    
-    .process-step:last-child::before {
-        display: none;
-    }
-    
-    .step-indicator {
-        position: absolute;
-        left: 0;
-        top: 0;
-        width: 22px;
-        height: 22px;
-        border-radius: 50%;
-        background-color: #f8fafc;
-        border: 2px solid #e2e8f0;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        z-index: 1;
-        transition: all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
-    }
-    
-    .dark .step-indicator {
-        background-color: #1e293b;
-        border-color: #334155;
-    }
-    
-    .step-indicator.pending {
-        border-color: #94a3b8;
-    }
-    
-    .step-indicator.processing {
-        border-color: #0ea5e9;
-        animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
-        transform: scale(1.05);
-        box-shadow: 0 0 10px rgba(14, 165, 233, 0.4);
-    }
-    
-    .step-indicator.completed {
-        border-color: #10b981;
-        background-color: #dcfce7;
-        transform: scale(1.1);
-    }
-    
-    .dark .step-indicator.completed {
-        background-color: #064e3b;
-        box-shadow: 0 0 8px rgba(16, 185, 129, 0.4);
-    }
-    
-    .step-indicator.error {
-        border-color: #ef4444;
-        background-color: #fee2e2;
-        transform: scale(1.1);
-    }
-    
-    .dark .step-indicator.error {
-        background-color: #7f1d1d;
-        box-shadow: 0 0 8px rgba(239, 68, 68, 0.4);
-    }
-    
-    .step-indicator.skipped {
-        border-color: #f59e0b;
-        background-color: #fef3c7;
-    }
-    
-    .dark .step-indicator.skipped {
-        background-color: #78350f;
-        box-shadow: 0 0 8px rgba(245, 158, 11, 0.4);
-    }
-    
-    /* Results card animations */
-    .result-card {
-        animation: slideIn 0.3s ease-out forwards;
-        opacity: 0;
-        transition: transform 0.2s ease;
-        border-radius: 12px;
-    }
-    
-    .result-card:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
-    }
-    
-    .dark .result-card:hover {
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
-    }
-    
-    @keyframes slideIn {
-        from {
-            transform: translateY(20px);
-            opacity: 0;
-        }
-        to {
-            transform: translateY(0);
-            opacity: 1;
-        }
-    }
-    
-    /* Pulsing animation for active elements */
-    .pulse-border {
-        position: relative;
-    }
-    
-    .pulse-border::after {
-        content: '';
-        position: absolute;
-        top: 0;
-        left: 0;
-        right: 0;
-        bottom: 0;
-        border: 2px solid #0ea5e9;
-        border-radius: inherit;
-        opacity: 0;
-        animation: pulseBorder 2s cubic-bezier(0, 0, 0.2, 1) infinite;
-    }
-    
-    @keyframes pulseBorder {
-        0% {
-            transform: scale(1);
-            opacity: 0.7;
-        }
-        100% {
-            transform: scale(1.05);
-            opacity: 0;
-        }
-    }
-    
-    /* Progress bar styles */
-    .progress-container {
-        width: 100%;
-        height: 6px;
-        background-color: #f1f5f9;
-        border-radius: 3px;
-        overflow: hidden;
-        margin-top: 10px;
-        position: relative;
-        box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.05);
-    }
-    
-    .dark .progress-container {
-        background-color: #1e293b;
-        box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.2);
-    }
-    
-    .progress-bar {
-        height: 100%;
-        width: 0%;
-        background: linear-gradient(90deg, #0ea5e9, #a855f7);
-        border-radius: 3px;
-        transition: width 0.3s ease-out;
-        background-size: 200% 100%;
-        animation: gradientShift 3s ease infinite;
-    }
-    
-    @keyframes gradientShift {
-        0% { background-position: 0% 50%; }
-        50% { background-position: 100% 50%; }
-        100% { background-position: 0% 50%; }
-    }
-    
-    /* Progress bar shine effect */
-    .progress-bar::after {
-        content: '';
-        position: absolute;
-        top: 0;
-        left: 0;
-        bottom: 0;
-        right: 0;
-        background-image: linear-gradient(
-            110deg, 
-            rgba(255, 255, 255, 0) 0%, 
-            rgba(255, 255, 255, 0.5) 40%, 
-            rgba(255, 255, 255, 0.5) 60%, 
-            rgba(255, 255, 255, 0) 100%
-        );
-        background-size: 200% 100%;
-        background-position: -100% 0;
-        animation: progressShine 2s infinite linear;
-    }
-    
-    .dark .progress-bar::after {
-        background-image: linear-gradient(
-            110deg, 
-            rgba(255, 255, 255, 0) 0%, 
-            rgba(255, 255, 255, 0.2) 40%, 
-            rgba(255, 255, 255, 0.2) 60%, 
-            rgba(255, 255, 255, 0) 100%
-        );
-    }
-    
-    @keyframes progressShine {
-        to {
-            background-position: 200% 0;
-        }
-    }
-    
-    /* Processing indicator */
-    .processing-indicator {
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-        font-size: 0.875rem;
-        margin-top: 0.5rem;
-        opacity: 0;
-        height: 0;
-        overflow: hidden;
-        transition: opacity 0.3s ease, height 0.3s ease;
-    }
-    
-    .processing-indicator.active {
-        opacity: 1;
-        height: 1.5rem;
-    }
-    
-    /* Tab styling enhancements */
-    .tab-button {
-        transition: all 0.2s ease;
-        position: relative;
-        overflow: hidden;
-    }
-    
-    .tab-button::after {
-        content: '';
-        position: absolute;
-        bottom: 0;
-        left: 50%;
-        width: 0;
-        height: 2px;
-        background: #0ea5e9;
-        transition: all 0.3s ease;
-        transform: translateX(-50%);
-    }
-    
-    .tab-button:hover::after {
-        width: 100%;
-    }
-    
-    /* Enhanced typing indicator */
-    .typing-indicator {
-        display: inline-flex;
-        align-items: center;
-        background-color: rgba(226, 232, 240, 0.3);
-        padding: 8px 12px;
-        border-radius: 16px;
-        margin: 4px 0;
-    }
-    
-    .dark .typing-indicator {
-        background-color: rgba(30, 41, 59, 0.3);
-    }
-    
-    .typing-indicator span {
-        height: 8px;
-        width: 8px;
-        background-color: #0ea5e9;
-        border-radius: 50%;
-        display: inline-block;
-        margin: 0 2px;
-        opacity: 0.6;
-    }
-    
-    .dark .typing-indicator span {
-        background-color: #38bdf8;
-    }
-    
-    .typing-indicator span:nth-child(1) {
-        animation: bounce 1s infinite 0.1s;
-    }
-    
-    .typing-indicator span:nth-child(2) {
-        animation: bounce 1s infinite 0.3s;
-    }
-    
-    .typing-indicator span:nth-child(3) {
-        animation: bounce 1s infinite 0.5s;
-    }
-    
-    @keyframes bounce {
-        0%, 80%, 100% { transform: translateY(0); }
-        40% { transform: translateY(-5px); }
-    }
-    
-    /* Floating animation for sidebar */
-    @keyframes floatingPanel {
-        0% { transform: translateY(0); }
-        50% { transform: translateY(-5px); }
-        100% { transform: translateY(0); }
-    }
-    
-    #visualization-container {
-        animation: floatingPanel 6s ease-in-out infinite;
-    }
-    
-    /* Chat input enhancements */
-    #question-input {
-        transition: all 0.3s ease;
-    }
-    
-    #question-input:focus {
-        transform: translateY(-1px);
-        box-shadow: 0 4px 12px rgba(14, 165, 233, 0.15);
-    }
-    
-    .dark #question-input:focus {
-        box-shadow: 0 4px 12px rgba(14, 165, 233, 0.1);
-    }
-    
-    /* Send button enhancements */
-    #question-form button {
-        transition: all 0.3s ease;
-        position: relative;
-        overflow: hidden;
-    }
-    
-    #question-form button:hover {
-        transform: translateY(-1px);
-    }
-    
-    #question-form button:active {
-        transform: translateY(1px);
-    }
-    
-    #question-form button::after {
-        content: '';
-        position: absolute;
-        top: 50%;
-        left: 50%;
-        width: 5px;
-        height: 5px;
-        background: rgba(255, 255, 255, 0.5);
-        opacity: 0;
-        border-radius: 100%;
-        transform: scale(1, 1) translate(-50%);
-        transform-origin: 50% 50%;
-    }
-    
-    #question-form button:focus:not(:active)::after {
-        animation: ripple 0.6s ease-out;
-    }
-    
-    @keyframes ripple {
-        0% {
-            transform: scale(0, 0);
-            opacity: 0.5;
-        }
-        100% {
-            transform: scale(20, 20);
-            opacity: 0;
-        }
-    }
-</style>
-{% endblock %}
+{% block title %}PDF Wisdom Chat{% endblock %}
 
 {% block content %}
-<div class="flex flex-col lg:flex-row gap-6 h-[calc(100vh-180px)]">
-    <!-- Chat section -->
-    <div class="flex-1 flex flex-col bg-white dark:bg-dark-300 rounded-lg shadow-soft overflow-hidden border border-gray-200 dark:border-dark-100 transition-colors">
-        <!-- Chat header -->
-        <div class="p-4 border-b border-gray-200 dark:border-dark-100 bg-white dark:bg-dark-300 transition-colors">
-            <div class="flex items-center justify-between">
-                <div class="flex items-center space-x-3">
-                    <div class="w-10 h-10 bg-gradient-to-tr from-primary-500 to-primary-400 dark:from-primary-600 dark:to-primary-400 text-white rounded-full flex items-center justify-center shadow-md">
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
-                        </svg>
-                    </div>
-                    <div>
-                        <h2 class="text-lg font-medium text-secondary-900 dark:text-white transition-colors">Wisdom Assistant</h2>
-                        <p class="text-sm text-secondary-500 dark:text-gray-400 transition-colors">Ask me anything from your PDFs</p>
-                    </div>
-                </div>
-                <div>
-                    <span id="status-indicator" class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400">
-                        <svg class="-ml-0.5 mr-1.5 h-2 w-2 text-green-400" fill="currentColor" viewBox="0 0 8 8">
-                            <circle cx="4" cy="4" r="3" />
-                        </svg>
-                        Online
-                    </span>
-                </div>
-            </div>
-            
-            <!-- Progress indicator (initially hidden) -->
-            <div id="processing-container" class="mt-2 hidden">
-                <div class="processing-indicator" id="processing-indicator">
-                    <svg class="animate-spin -ml-1 mr-2 h-4 w-4 text-primary-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                    </svg>
-                    <span id="processing-step" class="text-secondary-700 dark:text-gray-300">Processing your question...</span>
-                </div>
-                <div class="progress-container" id="progress-container">
-                    <div class="progress-bar" id="progress-bar"></div>
-                </div>
-            </div>
+<div class="flex flex-col h-full max-w-4xl mx-auto w-full px-4 py-6 md:py-10">
+    <!-- Welcome message/screen -->
+    <div id="welcome-screen" class="flex flex-col items-center justify-center h-full animate-fade-in">
+        <!-- Logo/Icon -->
+        <div class="mb-6 bg-gradient-radial from-grok-800 to-grok-900 p-10 rounded-full">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-16 w-16 text-primary-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path>
+                <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path>
+            </svg>
         </div>
         
-        <!-- Chat messages -->
-        <div id="chat-messages" class="flex-1 overflow-y-auto p-4 space-y-4 bg-gray-50 dark:bg-dark-400 transition-colors">
-            <!-- Welcome message -->
-            <div class="message bot-message">
-                <p class="text-secondary-800 dark:text-gray-200">
-                    Hello! I'm your Wisdom Assistant. I can help you find answers from your PDF knowledge base.
-                    Ask me any question, and I'll search through your documents to find the most relevant information.
-                </p>
-            </div>
-            <!-- Messages will be added here dynamically -->
-        </div>
+        <!-- Welcome text -->
+        <h1 class="text-3xl font-bold mb-3 text-transparent bg-clip-text bg-gradient-to-r from-primary-400 to-accent-400">
+            PDF Wisdom
+        </h1>
         
-        <!-- Chat input -->
-        <div class="p-4 border-t border-gray-200 dark:border-dark-100 bg-white dark:bg-dark-300 transition-colors">
-            <form id="question-form" class="flex space-x-2">
+        <p class="text-gray-400 max-w-md text-center mb-8">
+            Ask questions about your PDF knowledge base and get intelligent answers powered by vector search.
+        </p>
+        
+        <!-- Initial question input -->
+        <div class="w-full max-w-2xl">
+            <div class="relative">
                 <input 
                     type="text" 
-                    id="question-input" 
-                    placeholder="Ask a question..." 
-                    class="flex-1 px-4 py-2 border border-gray-300 dark:border-dark-100 bg-white dark:bg-dark-200 text-secondary-800 dark:text-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-colors"
-                    required
+                    id="welcome-input"
+                    class="w-full bg-grok-800 border border-grok-700 rounded-xl px-4 py-3 pr-12 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-accent-500/50 focus:border-accent-500 transition-all"
+                    placeholder="Ask anything about your documents..."
+                    autofocus
                 >
                 <button 
-                    type="submit" 
-                    class="px-4 py-2 bg-gradient-to-r from-primary-500 to-primary-600 hover:from-primary-600 hover:to-primary-700 dark:from-primary-600 dark:to-primary-700 dark:hover:from-primary-500 dark:hover:to-primary-600 text-white rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 transition-colors shadow-md"
+                    id="welcome-send-button"
+                    class="absolute right-3 top-1/2 -translate-y-1/2 text-accent-400 hover:text-accent-300 transition-colors"
                 >
-                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-                        <path fill-rule="evenodd" d="M10.293 3.293a1 1 0 011.414 0l6 6a1 1 0 010 1.414l-6 6a1 1 0 01-1.414-1.414L14.586 11H3a1 1 0 110-2h11.586l-4.293-4.293a1 1 0 010-1.414z" clip-rule="evenodd" />
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-5 h-5">
+                        <path d="M3.478 2.405a.75.75 0 00-.926.94l2.432 7.905H13.5a.75.75 0 010 1.5H4.984l-2.432 7.905a.75.75 0 00.926.94 60.519 60.519 0 0018.445-8.986.75.75 0 000-1.218A60.517 60.517 0 003.478 2.405z" />
                     </svg>
                 </button>
-            </form>
+            </div>
         </div>
     </div>
     
-    <!-- Visualization section -->
-    <div id="visualization-container" class="lg:w-1/3 xl:w-2/5 flex flex-col bg-white dark:bg-dark-300 rounded-lg shadow-soft overflow-hidden border border-gray-200 dark:border-dark-100 hidden lg:flex transition-colors">
-        <!-- Visualization header -->
-        <div class="p-4 border-b border-gray-200 dark:border-dark-100 bg-gradient-to-r from-white to-gray-50 dark:from-dark-300 dark:to-dark-400 transition-colors">
-            <h2 class="text-lg font-medium text-secondary-900 dark:text-white transition-colors">Search Visualization</h2>
-            <p class="text-sm text-secondary-500 dark:text-gray-400 transition-colors">See how the vector search works</p>
+    <!-- Chat interface -->
+    <div id="chat-interface" class="hidden flex flex-col h-full">
+        <!-- Messages container -->
+        <div id="chat-messages" class="flex-1 overflow-y-auto mb-4 space-y-6">
+            <!-- Messages will be inserted here by JavaScript -->
         </div>
         
-        <!-- Visualization content -->
-        <div class="flex-1 overflow-y-auto p-4">
-            <!-- Tabs -->
-            <div class="border-b border-gray-200 dark:border-dark-100 transition-colors">
-                <nav class="-mb-px flex space-x-6">
-                    <button id="tab-process" class="tab-button border-primary-500 text-primary-600 dark:text-primary-400 whitespace-nowrap py-2 px-1 border-b-2 font-medium text-sm transition-colors">
-                        Process
-                    </button>
-                    <button id="tab-decomposition" class="tab-button border-transparent text-secondary-500 dark:text-gray-400 hover:text-secondary-700 dark:hover:text-gray-300 hover:border-secondary-300 whitespace-nowrap py-2 px-1 border-b-2 font-medium text-sm transition-colors">
-                        Decomposition
-                    </button>
-                    <button id="tab-search" class="tab-button border-transparent text-secondary-500 dark:text-gray-400 hover:text-secondary-700 dark:hover:text-gray-300 hover:border-secondary-300 whitespace-nowrap py-2 px-1 border-b-2 font-medium text-sm transition-colors">
-                        Search Results
-                    </button>
-                    <button id="tab-similarity" class="tab-button border-transparent text-secondary-500 dark:text-gray-400 hover:text-secondary-700 dark:hover:text-gray-300 hover:border-secondary-300 whitespace-nowrap py-2 px-1 border-b-2 font-medium text-sm transition-colors">
-                        Similarity
-                    </button>
-                </nav>
-            </div>
-            
-            <!-- Tab content -->
-            <div class="mt-4 space-y-4">
-                <!-- Process view (new) -->
-                <div id="view-process" class="tab-content">
-                    <div class="p-4 bg-gray-50 dark:bg-dark-400 rounded-lg transition-colors shadow-sm">
-                        <h3 class="font-medium text-secondary-900 dark:text-white mb-4 transition-colors">Processing Steps</h3>
-                        <div id="process-steps" class="pl-4">
-                            <!-- Process steps will be rendered here -->
-                            <div class="text-sm text-secondary-500 dark:text-gray-400 transition-colors">
-                                Ask a question to see the processing steps
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                
-                <!-- Decomposition view -->
-                <div id="view-decomposition" class="tab-content hidden">
-                    <div class="p-4 bg-gray-50 dark:bg-dark-400 rounded-lg transition-colors shadow-sm">
-                        <h3 class="font-medium text-secondary-900 dark:text-white mb-2 transition-colors">Sub-questions</h3>
-                        <ul id="sub-questions-list" class="list-disc pl-5 text-sm text-secondary-700 dark:text-gray-300 mb-4 transition-colors">
-                            <li>Sub-questions will appear here</li>
-                        </ul>
-                        
-                        <h3 class="font-medium text-secondary-900 dark:text-white mb-2 transition-colors">Key Concepts</h3>
-                        <ul id="concepts-list" class="list-disc pl-5 text-sm text-secondary-700 dark:text-gray-300 mb-4 transition-colors">
-                            <li>Key concepts will appear here</li>
-                        </ul>
-                        
-                        <div id="body-parts-section" class="hidden">
-                            <h3 class="font-medium text-secondary-900 dark:text-white mb-2 transition-colors">Body Parts</h3>
-                            <ul id="body-parts-list" class="list-disc pl-5 text-sm text-secondary-700 dark:text-gray-300 transition-colors">
-                                <li>Body parts will appear here</li>
-                            </ul>
-                        </div>
-                    </div>
-                </div>
-                
-                <!-- Search results view -->
-                <div id="view-search" class="tab-content hidden">
-                    <div id="search-results" class="space-y-3">
-                        <p class="text-sm text-secondary-500 dark:text-gray-400 transition-colors">Ask a question to see search results</p>
-                    </div>
-                </div>
-                
-                <!-- Similarity visualization view -->
-                <div id="view-similarity" class="tab-content hidden">
-                    <div id="similarity-chart" class="h-80">
-                        <!-- Plotly chart will be rendered here -->
-                    </div>
-                </div>
-            </div>
+        <!-- Input form -->
+        <div id="input-container" class="border-t border-grok-800 pt-4">
+            <form id="question-form" class="relative">
+                <textarea 
+                    id="question-input" 
+                    class="w-full bg-grok-800 border border-grok-700 rounded-xl px-4 py-3 pr-12 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-accent-500/50 focus:border-accent-500 resize-none transition-all"
+                    placeholder="Ask a question..."
+                    rows="1"
+                    required
+                ></textarea>
+                <button 
+                    id="send-button"
+                    type="submit" 
+                    class="absolute right-3 top-1/2 -translate-y-1/2 text-accent-400 hover:text-accent-300 disabled:text-gray-600 disabled:cursor-not-allowed transition-colors"
+                >
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-5 h-5">
+                        <path d="M3.478 2.405a.75.75 0 00-.926.94l2.432 7.905H13.5a.75.75 0 010 1.5H4.984l-2.432 7.905a.75.75 0 00.926.94 60.519 60.519 0 0018.445-8.986.75.75 0 000-1.218A60.517 60.517 0 003.478 2.405z" />
+                    </svg>
+                </button>
+            </form>
         </div>
     </div>
 </div>
@@ -605,720 +79,408 @@
 
 {% block scripts %}
 <script>
-    // DOM elements
-    const questionForm = document.getElementById('question-form');
-    const questionInput = document.getElementById('question-input');
-    const chatMessages = document.getElementById('chat-messages');
-    const statusIndicator = document.getElementById('status-indicator');
-    const visualizationContainer = document.getElementById('visualization-container');
-    
-    // Tab navigation
-    const tabButtons = document.querySelectorAll('.tab-button');
-    const tabContents = document.querySelectorAll('.tab-content');
-    
-    // Visualization elements
-    const processSteps = document.getElementById('process-steps');
-    const subQuestionsList = document.getElementById('sub-questions-list');
-    const conceptsList = document.getElementById('concepts-list');
-    const bodyPartsSection = document.getElementById('body-parts-section');
-    const bodyPartsList = document.getElementById('body-parts-list');
-    const searchResults = document.getElementById('search-results');
-    const similarityChart = document.getElementById('similarity-chart');
-    
-    // Process step icons
-    const stepIcons = {
-        'pending': '<svg class="w-3 h-3 text-gray-400 dark:text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>',
-        'processing': '<svg class="w-3 h-3 text-primary-500 animate-spin" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>',
-        'completed': '<svg class="w-3 h-3 text-green-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" /></svg>',
-        'error': '<svg class="w-3 h-3 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" /></svg>',
-        'skipped': '<svg class="w-3 h-3 text-yellow-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 5l7 7-7 7M5 5l7 7-7 7" /></svg>'
-    };
-    
-    // Check service health
-    async function checkHealth() {
-        try {
-            const response = await fetch('/api/health');
-            const data = await response.json();
-            
-            if (data.status === 'ok') {
-                statusIndicator.innerHTML = `
-                    <svg class="-ml-0.5 mr-1.5 h-2 w-2 text-green-400" fill="currentColor" viewBox="0 0 8 8">
-                        <circle cx="4" cy="4" r="3" />
-                    </svg>
-                    Online
-                `;
-                statusIndicator.className = 'inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400';
+    document.addEventListener('DOMContentLoaded', function() {
+        // DOM elements
+        const welcomeScreen = document.getElementById('welcome-screen');
+        const welcomeInput = document.getElementById('welcome-input');
+        const welcomeSendButton = document.getElementById('welcome-send-button');
+        const chatInterface = document.getElementById('chat-interface');
+        const chatMessages = document.getElementById('chat-messages');
+        const questionForm = document.getElementById('question-form');
+        const questionInput = document.getElementById('question-input');
+        const sendButton = document.getElementById('send-button');
+        
+        // Auto-resize textarea
+        questionInput.addEventListener('input', function() {
+            this.style.height = 'auto';
+            this.style.height = (this.scrollHeight) + 'px';
+            if (this.scrollHeight > 150) {
+                this.style.overflowY = 'auto';
             } else {
-                statusIndicator.innerHTML = `
-                    <svg class="-ml-0.5 mr-1.5 h-2 w-2 text-red-400" fill="currentColor" viewBox="0 0 8 8">
-                        <circle cx="4" cy="4" r="3" />
-                    </svg>
-                    Offline
-                `;
-                statusIndicator.className = 'inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400';
+                this.style.overflowY = 'hidden';
             }
-        } catch (error) {
-            console.error('Health check failed:', error);
-            statusIndicator.innerHTML = `
-                <svg class="-ml-0.5 mr-1.5 h-2 w-2 text-yellow-400" fill="currentColor" viewBox="0 0 8 8">
-                    <circle cx="4" cy="4" r="3" />
-                </svg>
-                Unknown
-            `;
-            statusIndicator.className = 'inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400';
-        }
-    }
-    
-    // Add a message to the chat
-    function addMessage(content, isUser = false) {
-        const messageElement = document.createElement('div');
-        messageElement.className = `message ${isUser ? 'user-message' : 'bot-message'}`;
-        
-        // For longer messages with markdown-like formatting
-        if (!isUser && content.includes('\n')) {
-            // Simple markdown-like rendering for bot messages
-            const formattedContent = content
-                .replace(/\n\n/g, '</p><p>')
-                .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-                .replace(/\*(.*?)\*/g, '<em>$1</em>')
-                .replace(/\n- /g, '<br>• ');
-                
-            messageElement.innerHTML = `<p class="text-secondary-800 dark:text-gray-200">${formattedContent}</p>`;
-        } else {
-            messageElement.innerHTML = `<p class="text-secondary-800 dark:text-gray-200">${content}</p>`;
-        }
-        
-        chatMessages.appendChild(messageElement);
-        chatMessages.scrollTop = chatMessages.scrollHeight;
-    }
-    
-    // Add a typing indicator
-    function addTypingIndicator() {
-        const typingElement = document.createElement('div');
-        typingElement.id = 'typing-indicator';
-        typingElement.className = 'message bot-message';
-        typingElement.innerHTML = `
-            <div class="typing-indicator">
-                <span></span>
-                <span></span>
-                <span></span>
-            </div>
-        `;
-        chatMessages.appendChild(typingElement);
-        chatMessages.scrollTop = chatMessages.scrollHeight;
-    }
-    
-    // Remove typing indicator
-    function removeTypingIndicator() {
-        const typingElement = document.getElementById('typing-indicator');
-        if (typingElement) {
-            typingElement.remove();
-        }
-    }
-    
-    // Show processing indicator
-    function showProcessingIndicator(step = 'Processing your question...') {
-        const container = document.getElementById('processing-container');
-        const indicator = document.getElementById('processing-indicator');
-        const stepText = document.getElementById('processing-step');
-        
-        container.classList.remove('hidden');
-        indicator.classList.add('active');
-        stepText.textContent = step;
-    }
-    
-    // Hide processing indicator
-    function hideProcessingIndicator() {
-        const container = document.getElementById('processing-container');
-        const indicator = document.getElementById('processing-indicator');
-        
-        container.classList.add('hidden');
-        indicator.classList.remove('active');
-    }
-    
-    // Update progress bar
-    function updateProgressBar(percentage) {
-        const progressBar = document.getElementById('progress-bar');
-        progressBar.style.width = `${percentage}%`;
-    }
-    
-    // Initialize process steps visualization
-    function initProcessSteps(steps) {
-        processSteps.innerHTML = '';
-        
-        steps.forEach((step, index) => {
-            const stepElement = document.createElement('div');
-            stepElement.id = `step-${step.id}`;
-            stepElement.className = 'process-step';
-            
-            stepElement.innerHTML = `
-                <div class="step-indicator ${step.status}">
-                    ${stepIcons[step.status]}
-                </div>
-                <div class="ml-2">
-                    <h4 class="text-sm font-medium text-secondary-800 dark:text-white">${step.name}</h4>
-                    <p class="text-xs text-secondary-500 dark:text-gray-400">${getStepStatusText(step.status)}</p>
-                    <div class="step-details text-xs mt-1 text-secondary-600 dark:text-gray-300 hidden"></div>
-                </div>
-            `;
-            
-            processSteps.appendChild(stepElement);
         });
-    }
-    
-    // Update process step visualization
-    function updateProcessStep(stepId, status, details = null) {
-        const stepElement = document.getElementById(`step-${stepId}`);
-        if (!stepElement) return;
         
-        // Find the indicator element and update it
-        const indicator = stepElement.querySelector('.step-indicator');
-        indicator.className = `step-indicator ${status}`;
-        indicator.innerHTML = stepIcons[status];
-        
-        // Update status text
-        const statusText = stepElement.querySelector('p');
-        statusText.textContent = getStepStatusText(status);
-        
-        // Add details if provided
-        if (details) {
-            const detailsElement = stepElement.querySelector('.step-details');
-            detailsElement.innerHTML = formatStepDetails(stepId, details);
-            detailsElement.classList.remove('hidden');
-        }
-        
-        // Add active class
-        if (status === 'processing') {
-            stepElement.classList.add('active');
-        } else {
-            stepElement.classList.remove('active');
-        }
-        
-        // Update the processing indicator text
-        if (status === 'processing') {
-            const stepName = stepElement.querySelector('h4').textContent;
-            document.getElementById('processing-step').textContent = `${stepName}...`;
-        }
-    }
-    
-    // Format step details for display
-    function formatStepDetails(stepId, details) {
-        if (!details) return '';
-        
-        switch(stepId) {
-            case 'language':
-                return `Detected: <strong>${details.language}</strong> (${(details.confidence * 100).toFixed(1)}% confidence)`;
-            case 'translation':
-                if (details.reason) return `Reason: ${details.reason}`;
-                if (details.error) return `Error: ${details.error}`;
-                return `Translated from <strong>${details.original.substring(0, 30)}...</strong>`;
-            case 'decomposition':
-                return `Identified ${details.sub_questions?.length || 0} sub-questions and ${details.concepts?.length || 0} concepts`;
-            case 'search':
-                return `Searched ${details.query_count} queries, found ${details.result_count} results`;
-            case 'answer':
-                return `Generated answer (${details.length} characters)`;
-            case 'translation_back':
-                if (details.reason) return `Reason: ${details.reason}`;
-                if (details.error) return `Error: ${details.error}`;
-                return `Translated answer to ${details.translated_to}`;
-            default:
-                return JSON.stringify(details);
-        }
-    }
-    
-    // Get human-readable status text
-    function getStepStatusText(status) {
-        switch(status) {
-            case 'pending': return 'Waiting';
-            case 'processing': return 'Processing...';
-            case 'completed': return 'Completed';
-            case 'error': return 'Error';
-            case 'skipped': return 'Skipped';
-            default: return status;
-        }
-    }
-    
-    // Connect to Server-Sent Events stream
-    function connectToEventStream(sessionId) {
-        const eventSource = new EventSource(`/api/progress-stream/${sessionId}`);
-        let resultProcessed = false; // Flag to track if a result has been processed
-        
-        // Handle connection open
-        eventSource.onopen = function() {
-            console.log('Connected to event stream');
-        };
-        
-        // Handle connection error
-        eventSource.onerror = function(error) {
-            console.error('Event stream error:', error);
-            eventSource.close();
-            hideProcessingIndicator();
-            if (!resultProcessed) {
-                removeTypingIndicator();
-                addMessage('Sorry, there was an error processing your question. Please try again.');
+        // Welcome input handling - Enter key press
+        welcomeInput.addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                handleWelcomeInput();
             }
-        };
+        });
         
-        // Handle messages
-        eventSource.onmessage = function(event) {
-            try {
-                const data = JSON.parse(event.data);
-                console.log('Event received:', data);
+        // Welcome input handling - Button click
+        welcomeSendButton.addEventListener('click', function(e) {
+            e.preventDefault();
+            handleWelcomeInput();
+        });
+        
+        function handleWelcomeInput() {
+            const question = welcomeInput.value.trim();
+            if (question) {
+                // Switch to chat interface
+                welcomeScreen.classList.add('hidden');
+                chatInterface.classList.remove('hidden');
+                chatInterface.classList.add('animate-fade-in');
                 
-                switch(data.event) {
-                    case 'connected':
-                        // Connection established
-                        console.log('Connection established event received');
-                        break;
-                        
-                    case 'process_init':
-                        // Initialize process steps
-                        console.log('Process init event received');
-                        initProcessSteps(data.process_steps);
-                        break;
-                        
-                    case 'step_update':
-                        // Update step status
-                        console.log('Step update event received for:', data.step_id);
-                        updateProcessStep(data.step_id, data.status, data.details);
-                        break;
-                        
-                    case 'progress':
-                        // Update progress bar
-                        console.log('Progress event received:', data.value);
-                        updateProgressBar(data.value);
-                        break;
-                        
-                    case 'result':
-                        // Complete result data received
-                        console.log('Result event received with data:', data.data);
-                        if (data.data) {
-                            console.log('Result data answer:', data.data.answer);
-                            console.log('Result data status:', data.data.status);
-                            processResult(data.data);
-                            resultProcessed = true; // Mark that we've processed a result
-                        } else {
-                            console.error('Result event received but data is missing or undefined');
-                            // Display error message if no data received
-                            removeTypingIndicator();
-                            addMessage('Sorry, I couldn\'t generate an answer based on the available information.');
-                            resultProcessed = true; // Mark as processed even though it was an error
-                        }
-                        break;
-                        
-                    case 'error':
-                        // Error occurred
-                        console.error('Error event received:', data.error);
-                        hideProcessingIndicator();
-                        if (!resultProcessed) {
-                            removeTypingIndicator();
-                            addMessage(`Sorry, an error occurred: ${data.error}`);
-                            resultProcessed = true; // Mark as processed since we displayed an error
-                        }
-                        eventSource.close();
-                        break;
-                        
-                    case 'complete':
-                    case 'end':
-                        // Stream ended
-                        console.log('Stream end/complete event received');
-                        eventSource.close();
-                        hideProcessingIndicator();
-                        
-                        // If we never got a result event but got a complete event, show an error
-                        if (!resultProcessed) {
-                            console.error('Stream ended without processing a result');
-                            removeTypingIndicator();
-                            addMessage('Sorry, I didn\'t receive a proper response. Please try again.');
-                            resultProcessed = true;
-                        }
-                        break;
+                // Process the question
+                addUserMessage(question);
+                processQuestion(question);
+                
+                // Focus the chat input
+                questionInput.value = '';
+                questionInput.focus();
+            }
+        }
+        
+        // Question form submission
+        questionForm.addEventListener('submit', function(e) {
+            e.preventDefault();
+            const question = questionInput.value.trim();
+            
+            if (question) {
+                addUserMessage(question);
+                processQuestion(question);
+                
+                questionInput.value = '';
+                questionInput.style.height = 'auto';
+                questionInput.focus();
+            }
+        });
+        
+        // Add a user message to the chat
+        function addUserMessage(message) {
+            const messageContainer = document.createElement('div');
+            messageContainer.className = 'flex justify-end';
+            
+            const messageDiv = document.createElement('div');
+            messageDiv.className = 'max-w-[90%] bg-accent-600 text-white px-4 py-3 rounded-2xl rounded-tr-md message-transition';
+            messageDiv.textContent = message;
+            
+            messageContainer.appendChild(messageDiv);
+            chatMessages.appendChild(messageContainer);
+            
+            // Scroll to bottom
+            scrollToBottom();
+        }
+        
+        // Add an assistant message to the chat
+        function addAssistantMessage(message) {
+            const messageContainer = document.createElement('div');
+            messageContainer.className = 'flex justify-start';
+            
+            const messageDiv = document.createElement('div');
+            messageDiv.className = 'max-w-[90%] bg-grok-800 text-white px-4 py-3 rounded-2xl rounded-tl-md message-transition';
+            
+            if (message && message.trim() !== '') {
+                messageDiv.textContent = message;
+            }
+            
+            messageContainer.appendChild(messageDiv);
+            chatMessages.appendChild(messageContainer);
+            
+            // Scroll to bottom
+            scrollToBottom();
+            
+            return messageDiv;
+        }
+        
+        // Add typing indicator
+        function addTypingIndicator() {
+            const messageContainer = document.createElement('div');
+            messageContainer.className = 'flex justify-start';
+            messageContainer.id = 'typing-indicator';
+            
+            const typingDiv = document.createElement('div');
+            typingDiv.className = 'bg-grok-800 px-5 py-4 rounded-2xl rounded-tl-md flex items-center space-x-1';
+            
+            for (let i = 0; i < 3; i++) {
+                const dot = document.createElement('div');
+                dot.className = 'typing-dot h-2 w-2 bg-gray-400 rounded-full';
+                typingDiv.appendChild(dot);
+            }
+            
+            messageContainer.appendChild(typingDiv);
+            chatMessages.appendChild(messageContainer);
+            
+            // Scroll to bottom
+            scrollToBottom();
+        }
+        
+        // Remove typing indicator
+        function removeTypingIndicator() {
+            const indicator = document.getElementById('typing-indicator');
+            if (indicator) {
+                indicator.remove();
+            }
+        }
+        
+        // Scroll chat to bottom
+        function scrollToBottom() {
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+        }
+        
+        // Create a progress container in an assistant message
+        function createProgressContainer() {
+            const messageDiv = addAssistantMessage('');
+            const progressId = `progress-${Date.now()}`;
+            
+            const progressContainer = document.createElement('div');
+            progressContainer.id = progressId;
+            progressContainer.className = 'pb-2';
+            
+            messageDiv.appendChild(progressContainer);
+            
+            return {
+                containerId: progressId, 
+                messageElement: messageDiv
+            };
+        }
+        
+        // Update progress with steps visualization
+        function updateProgressVisualization(containerId, steps) {
+            const container = document.getElementById(containerId);
+            if (!container) return null;
+            
+            container.innerHTML = '';
+            
+            // Only add the progress steps we want to show
+            const stepsToShow = steps.filter(step => step.id !== 'answer');
+            
+            const stepsContainer = document.createElement('div');
+            stepsContainer.className = 'py-2 px-2 space-y-1 text-sm text-gray-400';
+            
+            stepsToShow.forEach(step => {
+                const stepElement = document.createElement('div');
+                stepElement.dataset.stepId = step.id;
+                
+                // Determine status classes
+                let statusClasses = 'text-gray-500';
+                let statusIcon = '◦'; // default - not started
+                
+                if (step.status === 'processing') {
+                    statusClasses = 'text-accent-400';
+                    statusIcon = '◯'; // processing
+                } else if (step.status === 'completed') {
+                    statusClasses = 'text-primary-400';
+                    statusIcon = '●'; // completed
+                }
+                
+                stepElement.className = `flex items-center space-x-2 ${statusClasses} transition-colors duration-300`;
+                
+                const icon = document.createElement('span');
+                icon.textContent = statusIcon;
+                icon.className = step.status === 'processing' ? 'animate-pulse-slow' : '';
+                
+                const text = document.createElement('span');
+                text.textContent = step.name;
+                
+                stepElement.appendChild(icon);
+                stepElement.appendChild(text);
+                stepsContainer.appendChild(stepElement);
+            });
+            
+            container.appendChild(stepsContainer);
+            scrollToBottom();
+            
+            return container;
+        }
+        
+        // Add streamed text to a message element
+        function appendStreamedText(messageElement, text) {
+            // Create or get the answer content element
+            let answerElement = messageElement.querySelector('.answer-content');
+            
+            if (!answerElement) {
+                answerElement = document.createElement('div');
+                answerElement.className = 'answer-content whitespace-pre-line';
+                messageElement.appendChild(answerElement);
+            }
+            
+            // Append the new text
+            answerElement.textContent += text;
+            scrollToBottom();
+        }
+        
+        // Process the user question
+        async function processQuestion(question) {
+            // Disable input during processing
+            sendButton.disabled = true;
+            questionInput.disabled = true;
+            
+            // Add assistant's typing indicator
+            addTypingIndicator();
+            
+            try {
+                // Send question to API
+                const response = await fetch('/api/ask', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ question })
+                });
+                
+                const data = await response.json();
+                
+                if (data.error) {
+                    removeTypingIndicator();
+                    addAssistantMessage(`Sorry, I encountered an error: ${data.error}`);
+                    return;
+                }
+                
+                if (data.status === 'processing' && data.session_id) {
+                    // Remove typing indicator
+                    removeTypingIndicator();
+                    
+                    // Create message element for answer
+                    const progress = createProgressContainer();
+                    
+                    // Initialize steps (only show analyzing and searching)
+                    const steps = [
+                        { id: 'decompose', name: 'Analyzing question', status: 'waiting' },
+                        { id: 'search', name: 'Searching knowledge base', status: 'waiting' },
+                        { id: 'answer', name: 'Generating answer', status: 'waiting' } // Still track this but don't display
+                    ];
+                    
+                    // Display initial progress
+                    updateProgressVisualization(progress.containerId, steps);
+                    
+                    // Connect to event stream for real-time updates
+                    connectToEventStream(data.session_id, progress);
+                } else {
+                    // Fallback for older API format
+                    removeTypingIndicator();
+                    if (data.answer) {
+                        addAssistantMessage(data.answer);
+                    } else {
+                        addAssistantMessage('Sorry, something went wrong. Please try again.');
+                    }
                 }
             } catch (error) {
-                console.error('Error parsing event data:', error, event.data);
-                hideProcessingIndicator();
-                if (!resultProcessed) {
-                    removeTypingIndicator();
-                    addMessage('Sorry, there was an error processing your question. Please try again.');
-                    resultProcessed = true;
-                }
-                eventSource.close();
-            }
-        };
-        
-        return eventSource;
-    }
-    
-    // Process final result data
-    function processResult(data) {
-        console.log('processResult called with data:', data);
-        
-        // Add bot response if we have an answer
-        if (data && data.answer) {
-            console.log('Adding answer to chat:', data.answer.substring(0, 50) + '...');
-            removeTypingIndicator();
-            addMessage(data.answer);
-            
-            // Update visualization
-            updateVisualization(data);
-        } else {
-            console.error('No answer in result data. Full data:', JSON.stringify(data));
-            removeTypingIndicator();
-            addMessage('Sorry, I couldn\'t generate an answer based on the available information.');
-        }
-    }
-    
-    // Handle form submission
-    questionForm.addEventListener('submit', async (e) => {
-        e.preventDefault();
-        
-        const question = questionInput.value.trim();
-        if (!question) return;
-        
-        // Add user message
-        addMessage(question, true);
-        
-        // Clear input
-        questionInput.value = '';
-        
-        // Show typing indicator
-        addTypingIndicator();
-        
-        // Show visualization container and switch to process tab
-        visualizationContainer.classList.remove('hidden');
-        visualizationContainer.classList.add('flex');
-        
-        // Switch to process tab
-        switchTab('process');
-        
-        try {
-            // Send question to API
-            const response = await fetch('/api/ask', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({ question })
-            });
-            
-            const data = await response.json();
-            
-            if (data.error) {
+                console.error('Error:', error);
                 removeTypingIndicator();
-                addMessage('Sorry, I encountered an error: ' + data.error);
-                return;
-            }
-            
-            if (data.status === 'processing' && data.session_id) {
-                // Show processing indicator
-                showProcessingIndicator();
-                updateProgressBar(0);
-                
-                // Connect to event stream
-                connectToEventStream(data.session_id);
-            } else {
-                // Fallback for older API format
-                removeTypingIndicator();
-                if (data.answer) {
-                    addMessage(data.answer);
-                    updateVisualization(data);
-                } else {
-                    addMessage('Sorry, something went wrong. Please try again.');
-                }
-                hideProcessingIndicator();
-            }
-        } catch (error) {
-            console.error('Error:', error);
-            removeTypingIndicator();
-            hideProcessingIndicator();
-            addMessage('Sorry, something went wrong. Please try again later.');
-        }
-    });
-    
-    // Update visualization with data
-    function updateVisualization(data) {
-        // Update process steps
-        if (data.process) {
-            initProcessSteps(data.process);
-            
-            // Animate process steps
-            data.process.forEach(step => {
-                setTimeout(() => {
-                    updateProcessStep(step.id, step.status, step.details);
-                }, 300);
-            });
-        }
-        
-        // Update decomposition view
-        if (data.decomposition) {
-            // Update sub-questions
-            subQuestionsList.innerHTML = '';
-            if (data.decomposition.sub_questions && data.decomposition.sub_questions.length > 0) {
-                data.decomposition.sub_questions.forEach(question => {
-                    const li = document.createElement('li');
-                    li.textContent = question;
-                    li.className = 'text-sm text-secondary-700 dark:text-gray-300 mb-1 transition-colors';
-                    subQuestionsList.appendChild(li);
-                });
-            } else {
-                const li = document.createElement('li');
-                li.textContent = 'No sub-questions identified';
-                li.className = 'text-sm text-secondary-500 dark:text-gray-400 transition-colors';
-                subQuestionsList.appendChild(li);
-            }
-            
-            // Update concepts
-            conceptsList.innerHTML = '';
-            if (data.decomposition.concepts && data.decomposition.concepts.length > 0) {
-                data.decomposition.concepts.forEach(concept => {
-                    const li = document.createElement('li');
-                    li.textContent = concept;
-                    li.className = 'text-sm text-secondary-700 dark:text-gray-300 mb-1 transition-colors';
-                    conceptsList.appendChild(li);
-                });
-            } else {
-                const li = document.createElement('li');
-                li.textContent = 'No key concepts identified';
-                li.className = 'text-sm text-secondary-500 dark:text-gray-400 transition-colors';
-                conceptsList.appendChild(li);
-            }
-            
-            // Update body parts
-            bodyPartsList.innerHTML = '';
-            if (data.decomposition.body_parts && data.decomposition.body_parts.length > 0) {
-                bodyPartsSection.classList.remove('hidden');
-                data.decomposition.body_parts.forEach(part => {
-                    const li = document.createElement('li');
-                    li.textContent = part;
-                    li.className = 'text-sm text-secondary-700 dark:text-gray-300 mb-1 transition-colors font-medium text-primary-600 dark:text-primary-400';
-                    bodyPartsList.appendChild(li);
-                });
-            } else {
-                bodyPartsSection.classList.add('hidden');
+                addAssistantMessage('Sorry, something went wrong. Please try again later.');
+            } finally {
+                // Re-enable input
+                sendButton.disabled = false;
+                questionInput.disabled = false;
             }
         }
         
-        // Update search results view
-        if (data.visualization) {
-            searchResults.innerHTML = '';
+        // Connect to Server-Sent Events stream
+        function connectToEventStream(sessionId, progress) {
+            const eventSource = new EventSource(`/api/progress-stream/${sessionId}`);
             
-            // Add translation note if needed
-            if (data.original_language && data.original_language !== 'en') {
-                const translationNote = document.createElement('div');
-                translationNote.className = 'mb-3 p-2 bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300 rounded-md text-xs transition-colors';
-                translationNote.innerHTML = `<strong>Note:</strong> Your question was translated from ${data.original_language} to English for processing.`;
-                searchResults.appendChild(translationNote);
-            }
+            // Track steps
+            const steps = [
+                { id: 'decompose', name: 'Analyzing question', status: 'waiting' },
+                { id: 'search', name: 'Searching knowledge base', status: 'waiting' },
+                { id: 'answer', name: 'Generating answer', status: 'waiting' }
+            ];
             
-            // Create animation delay counter for staggered animations
-            let animationDelay = 0;
+            // Variables for streaming answer
+            let lastAnswerChunk = '';
+            let isAnswerStreaming = false;
+            let answerMessageElement = null;
+            let answerContent = '';
             
-            data.visualization.forEach(query => {
-                // Create query group
-                const queryGroup = document.createElement('div');
-                queryGroup.className = 'mb-4';
+            eventSource.onmessage = function(event) {
+                console.log('Event received:', event.data); // Debug logging
                 
-                // Query header
-                const queryHeader = document.createElement('h3');
-                queryHeader.className = 'text-sm font-medium text-secondary-900 dark:text-white mb-2 transition-colors';
-                queryHeader.textContent = `Query: "${query.query}"`;
-                queryGroup.appendChild(queryHeader);
-                
-                if (query.results && query.results.length > 0) {
-                    // Results list
-                    const resultsList = document.createElement('div');
-                    resultsList.className = 'space-y-2';
+                try {
+                    const data = JSON.parse(event.data);
                     
-                    query.results.forEach((result, index) => {
-                        animationDelay += 50;  // Increment delay for staggered animation
-                        
-                        const resultItem = document.createElement('div');
-                        resultItem.className = 'result-card p-3 bg-gray-50 dark:bg-dark-400 rounded border border-gray-200 dark:border-dark-100 text-sm transition-colors';
-                        resultItem.style.animationDelay = `${animationDelay}ms`;
-                        
-                        // Format based on type
-                        let content = '';
-                        
-                        if (result.type === 'concept') {
-                            content = `
-                                <div class="flex justify-between items-start mb-1">
-                                    <span class="font-medium text-secondary-900 dark:text-white transition-colors">${result.label}</span>
-                                    <span class="text-xs px-2 py-0.5 bg-blue-100 dark:bg-blue-900/30 text-blue-800 dark:text-blue-300 rounded-full transition-colors">${(result.score * 100).toFixed(1)}%</span>
-                                </div>
-                                <p class="text-secondary-700 dark:text-gray-300 transition-colors">${result.content}</p>
-                            `;
-                        } else if (result.type === 'qa_pair' || result.type === 'question') {
-                            content = `
-                                <div class="flex justify-between items-start mb-1">
-                                    <span class="font-medium text-secondary-900 dark:text-white transition-colors">Q: ${result.label}</span>
-                                    <span class="text-xs px-2 py-0.5 bg-purple-100 dark:bg-purple-900/30 text-purple-800 dark:text-purple-300 rounded-full transition-colors">${(result.score * 100).toFixed(1)}%</span>
-                                </div>
-                                <p class="text-secondary-700 dark:text-gray-300 transition-colors">A: ${result.content}</p>
-                            `;
-                        } else {
-                            content = `
-                                <div class="flex justify-between items-start mb-1">
-                                    <span class="font-medium text-secondary-900 dark:text-white transition-colors">Text</span>
-                                    <span class="text-xs px-2 py-0.5 bg-gray-100 dark:bg-gray-700 text-gray-800 dark:text-gray-300 rounded-full transition-colors">${(result.score * 100).toFixed(1)}%</span>
-                                </div>
-                                <p class="text-secondary-700 dark:text-gray-300 transition-colors">${result.content}</p>
-                            `;
+                    if (data.event === 'step_update') {
+                        // Update step status
+                        const stepIndex = steps.findIndex(s => s.id === data.step_id);
+                        if (stepIndex !== -1) {
+                            steps[stepIndex].status = data.status;
+                            
+                            // Update previous steps if needed
+                            if (data.status === 'processing' || data.status === 'completed') {
+                                for (let i = 0; i < stepIndex; i++) {
+                                    if (steps[i].status !== 'completed') {
+                                        steps[i].status = 'completed';
+                                    }
+                                }
+                            }
+                            
+                            // Update visualization (but don't show the answer step)
+                            updateProgressVisualization(progress.containerId, steps);
+                            
+                            // If answer generation starts, prepare for streaming by creating a new message bubble
+                            if (data.step_id === 'answer' && data.status === 'processing') {
+                                isAnswerStreaming = true;
+                                // Create a new message bubble for the answer
+                                answerMessageElement = addAssistantMessage('');
+                            }
+                        }
+                    }
+                    else if (data.event === 'answer_chunk') {
+                        // Handle streaming answer chunks in the dedicated answer bubble
+                        if (data.text && data.text !== lastAnswerChunk) {
+                            if (!answerMessageElement) {
+                                // Create a message bubble for the answer if it doesn't exist
+                                answerMessageElement = addAssistantMessage('');
+                            }
+                            // Append text to answer content
+                            answerContent += data.text;
+                            // Update the message bubble with the accumulated content
+                            answerMessageElement.textContent = answerContent;
+                            lastAnswerChunk = data.text;
+                            // Scroll to bottom to show the updated message
+                            scrollToBottom();
+                        }
+                    }
+                    else if (data.event === 'result') {
+                        // Process is complete
+                        let answer = '';
+                        if (data.answer) {
+                            answer = data.answer;
+                        } else if (data.data && data.data.answer) {
+                            answer = data.data.answer;
                         }
                         
-                        resultItem.innerHTML = content;
-                        resultsList.appendChild(resultItem);
-                    });
-                    
-                    queryGroup.appendChild(resultsList);
-                } else {
-                    // No results message
-                    const noResults = document.createElement('p');
-                    noResults.className = 'text-sm text-secondary-500 dark:text-gray-400 p-3 bg-gray-50 dark:bg-dark-400 rounded border border-gray-200 dark:border-dark-100 transition-colors';
-                    noResults.textContent = 'No results found for this query';
-                    queryGroup.appendChild(noResults);
-                }
-                
-                searchResults.appendChild(queryGroup);
-            });
-        }
-        
-        // Update similarity chart view
-        if (data.visualization) {
-            // Prepare data for similarity chart
-            const chartData = [];
-            
-            // Get top results across all queries
-            const allResults = [];
-            data.visualization.forEach(query => {
-                if (query.results) {
-                    query.results.forEach(result => {
-                        if (!allResults.some(r => r.id === result.id)) {
-                            allResults.push({
-                                id: result.id,
-                                label: result.label || result.id,
-                                similarity: result.score,
-                                source: result.source,
-                                type: result.type
-                            });
+                        // Only add the answer if we haven't been streaming it already
+                        if (answer && !isAnswerStreaming) {
+                            answerMessageElement = addAssistantMessage(answer);
+                        } else if (isAnswerStreaming && answerMessageElement && !answerContent) {
+                            // If streaming was started but no content was received, show the answer
+                            answerMessageElement.textContent = answer;
                         }
-                    });
-                }
-            });
-            
-            // Sort by similarity and take top 10
-            allResults.sort((a, b) => b.similarity - a.similarity);
-            const topResults = allResults.slice(0, 10);
-            
-            // Prepare bar chart data
-            const labels = topResults.map(r => r.label.length > 30 ? r.label.substring(0, 30) + '...' : r.label);
-            const values = topResults.map(r => r.similarity);
-            const colors = topResults.map(r => {
-                switch(r.type) {
-                    case 'concept': return 'rgba(14, 165, 233, 0.7)';  // primary-500
-                    case 'qa_pair': return 'rgba(168, 85, 247, 0.7)';  // accent-500
-                    case 'question': return 'rgba(168, 85, 247, 0.7)'; // accent-500
-                    default: return 'rgba(100, 116, 139, 0.7)';        // secondary-500
-                }
-            });
-            
-            // Adjust chart layout for dark mode
-            const isDarkMode = document.documentElement.classList.contains('dark');
-            const chartLayout = {
-                title: 'Top 10 Most Similar Results',
-                font: {
-                    color: isDarkMode ? '#f1f5f9' : '#1e293b'
-                },
-                paper_bgcolor: isDarkMode ? '#1e293b' : '#ffffff',
-                plot_bgcolor: isDarkMode ? '#1e293b' : '#ffffff',
-                margin: { l: 150, r: 10, t: 40, b: 30 },
-                xaxis: {
-                    title: 'Similarity Score',
-                    range: [0, 1],
-                    gridcolor: isDarkMode ? '#334155' : '#e2e8f0'
-                },
-                yaxis: {
-                    automargin: true,
-                    gridcolor: isDarkMode ? '#334155' : '#e2e8f0'
+                        
+                        // Make sure all steps are marked as completed
+                        steps.forEach(step => step.status = 'completed');
+                        updateProgressVisualization(progress.containerId, steps);
+                        
+                        // Close the event stream
+                        eventSource.close();
+                    }
+                    else if (data.event === 'complete' || data.event === 'end') {
+                        // Close the event stream on completion
+                        eventSource.close();
+                    }
+                } catch (error) {
+                    console.error('Error processing event:', error);
+                    // If we don't have an answer bubble yet, create one for the error
+                    if (!answerMessageElement) {
+                        addAssistantMessage('Error processing response');
+                    }
+                    eventSource.close();
                 }
             };
             
-            // Create bar chart
-            Plotly.newPlot('similarity-chart', [{
-                x: values,
-                y: labels,
-                type: 'bar',
-                orientation: 'h',
-                marker: {
-                    color: colors
-                },
-                text: topResults.map(r => `${(r.similarity * 100).toFixed(1)}%`),
-                textposition: 'auto',
-                hoverinfo: 'text',
-                hovertext: topResults.map(r => `${r.label}<br>Type: ${r.type}<br>Similarity: ${(r.similarity * 100).toFixed(1)}%`)
-            }], chartLayout, {
-                responsive: true
-            });
+            eventSource.onerror = function(error) {
+                // Handle event stream errors
+                console.error('EventSource error:', error);
+                eventSource.close();
+                // If we don't have an answer bubble yet, create one for the error
+                if (!answerMessageElement) {
+                    addAssistantMessage('Sorry, I lost connection. Please try again.');
+                }
+            };
         }
-    }
-    
-    // Switch to specified tab
-    function switchTab(tabId) {
-        // Update active tab button
-        tabButtons.forEach(btn => {
-            const id = btn.id.replace('tab-', '');
-            if (id === tabId) {
-                btn.classList.remove('border-transparent', 'text-secondary-500', 'hover:text-secondary-700', 'hover:border-secondary-300');
-                btn.classList.add('border-primary-500', 'text-primary-600', 'dark:text-primary-400');
-            } else {
-                btn.classList.remove('border-primary-500', 'text-primary-600', 'dark:text-primary-400');
-                btn.classList.add('border-transparent', 'text-secondary-500', 'hover:text-secondary-700', 'hover:border-secondary-300');
-            }
-        });
-        
-        // Show the corresponding tab content
-        tabContents.forEach(content => {
-            content.classList.add('hidden');
-        });
-        document.getElementById(`view-${tabId}`).classList.remove('hidden');
-    }
-    
-    // Tab switching
-    tabButtons.forEach(button => {
-        button.addEventListener('click', () => {
-            const tabId = button.id.replace('tab-', '');
-            switchTab(tabId);
-        });
     });
-    
-    // Dark mode chart update
-    document.getElementById('theme-toggle').addEventListener('click', function() {
-        // Wait for theme to update
-        setTimeout(() => {
-            const chartElement = document.getElementById('similarity-chart');
-            if (chartElement && chartElement.data) {
-                const isDarkMode = document.documentElement.classList.contains('dark');
-                Plotly.relayout('similarity-chart', {
-                    font: {
-                        color: isDarkMode ? '#f1f5f9' : '#1e293b'
-                    },
-                    paper_bgcolor: isDarkMode ? '#1e293b' : '#ffffff',
-                    plot_bgcolor: isDarkMode ? '#1e293b' : '#ffffff',
-                    xaxis: {
-                        gridcolor: isDarkMode ? '#334155' : '#e2e8f0'
-                    },
-                    yaxis: {
-                        gridcolor: isDarkMode ? '#334155' : '#e2e8f0'
-                    }
-                });
-            }
-        }, 100);
-    });
-    
-    // Initial health check
-    checkHealth();
-    
-    // Periodic health check every 60 seconds
-    setInterval(checkHealth, 60000);
 </script>
-{% endblock %} 
+{% endblock %}
