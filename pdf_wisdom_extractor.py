@@ -15,6 +15,7 @@ from tqdm import tqdm
 import random
 from collections import defaultdict
 import threading
+import glob
 
 # Import database utilities
 import db_utils
@@ -140,7 +141,12 @@ def extract_concepts_with_llm(chunk: str, api_key: str, author_name: str, transl
         
         When extracting, use the name "{author_name}" directly instead of generic terms like "speaker", "lecturer", "author", etc.
         
-        IMPORTANT: Translate ALL outputs to ENGLISH, including concepts, explanations, questions, and answers.
+        IMPORTANT EXTRACTION GUIDELINES:
+        1. Extract only universal concepts and Q&A pairs that are standalone and valuable without additional context
+        2. DO NOT extract personal questions (like "Why did my ex-husband take the children?") or anything that depends on personal situations
+        3. Focus on timeless wisdom, philosophical concepts, and spiritual teachings that are universally applicable
+        4. DO NOT include Q&A that requires knowing specific people's backstories or specific audience members' situations
+        5. Translate ALL outputs to ENGLISH, including concepts, explanations, questions, and answers
         
         Return your response ONLY as JSON in the following format (without markdown code or explanations):
         {{
@@ -148,7 +154,7 @@ def extract_concepts_with_llm(chunk: str, api_key: str, author_name: str, transl
             {{"concept": "Concept name in English", "explanation": "Explanation in English (max 100 words)"}}
           ],
           "qa_pairs": [
-            {{"question": "Question from text in English", "answer": "Answer to the question in English (max 80 words)"}}
+            {{"question": "Question from text in English that is universal and context-independent", "answer": "Answer to the question in English (max 80 words)"}}
           ]
         }}
         """
@@ -158,7 +164,12 @@ def extract_concepts_with_llm(chunk: str, api_key: str, author_name: str, transl
         
         When extracting, use the name "{author_name}" directly instead of generic terms like "speaker", "lecturer", "author", etc.
         
-        IMPORTANT: Respond in the SAME LANGUAGE as the input text. Do not translate the content.
+        IMPORTANT EXTRACTION GUIDELINES:
+        1. Extract only universal concepts and Q&A pairs that are standalone and valuable without additional context
+        2. DO NOT extract personal questions (like "Why did my ex-husband take the children?") or anything that depends on personal situations
+        3. Focus on timeless wisdom, philosophical concepts, and spiritual teachings that are universally applicable
+        4. DO NOT include Q&A that requires knowing specific people's backstories or specific audience members' situations
+        5. Respond in the SAME LANGUAGE as the input text. Do not translate the content.
         
         Return your response ONLY as JSON in the following format (without markdown code or explanations):
         {{
@@ -166,7 +177,7 @@ def extract_concepts_with_llm(chunk: str, api_key: str, author_name: str, transl
             {{"concept": "Concept name", "explanation": "Explanation of the concept (max 100 words)"}}
           ],
           "qa_pairs": [
-            {{"question": "Question from text", "answer": "Answer to the question (max 80 words)"}}
+            {{"question": "Question from text that is universal and context-independent", "answer": "Answer to the question (max 80 words)"}}
           ]
         }}
         """
@@ -888,10 +899,31 @@ def export_document_data(document_id: int):
     print(f"Exported QA pairs to {filename_base}_qa_pairs.json")
     return True
 
+# New function to discover PDF files in a directory
+def discover_pdf_files(pdf_directory: str) -> List[str]:
+    """Find all PDF files in the specified directory."""
+    if not os.path.isdir(pdf_directory):
+        print(f"Error: {pdf_directory} is not a valid directory")
+        return []
+    
+    # Find all PDFs in the directory (non-recursive)
+    pdf_files = glob.glob(os.path.join(pdf_directory, "*.pdf"))
+    
+    if not pdf_files:
+        print(f"Warning: No PDF files found in {pdf_directory}")
+        return []
+    
+    print(f"Found {len(pdf_files)} PDF files in {pdf_directory}")
+    return pdf_files
+
 def parse_arguments():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description="Extract wisdom from PDF lecture transcripts")
-    parser.add_argument("--pdf_path", type=str, help="Path to the PDF file")
+    # Add mutually exclusive group for PDF path or directory
+    pdf_source = parser.add_mutually_exclusive_group()
+    pdf_source.add_argument("--pdf_path", type=str, help="Path to a single PDF file")
+    pdf_source.add_argument("--pdf_dir", type=str, help="Path to a directory containing PDF files to process")
+    
     parser.add_argument("--chunk_size", type=int, default=1000, help="Number of words per chunk")
     parser.add_argument("--chunk_overlap", type=int, default=200, help="Number of overlapping words between chunks")
     parser.add_argument("--batch_size", type=int, default=3, help="Number of chunks to process in parallel (default: 3, set to 1 for sequential processing)")
@@ -1195,63 +1227,111 @@ if __name__ == "__main__":
             print(f"No concepts found for document ID {args.document_id}")
         sys.exit(0)
     
-    # Process a new document if pdf_path is provided
+    # Process a new document if pdf_path or pdf_dir is provided
+    pdf_files_to_process = []
+    
     if args.pdf_path:
-        pdf_path = args.pdf_path
-        pdf_filename = os.path.basename(pdf_path)
-        
-        # Extract document title from filename if not provided
-        document_title = args.title if args.title else os.path.splitext(pdf_filename)[0]
-        
-        # Create document record in database
-        print(f"Creating document record for {pdf_filename}...")
-        document_id = db_utils.create_document(
-            filename=pdf_filename,
-            title=document_title,
-            author=args.author,
-            file_path=os.path.abspath(pdf_path)
-        )
-        
-        if not document_id:
-            print("Error: Could not create document record in database")
+        # Single file mode
+        if os.path.isfile(args.pdf_path):
+            pdf_files_to_process = [args.pdf_path]
+        else:
+            print(f"Error: {args.pdf_path} is not a valid file")
             sys.exit(1)
-        
-        print(f"Document ID: {document_id}")
-        
-        # Extract text from PDF
-        pdf_text = extract_text_from_pdf(pdf_path)
-        
-        if not pdf_text:
-            print("Error: Could not extract text from PDF")
-            db_utils.update_document_status(document_id, "failed")
+    elif args.pdf_dir:
+        # Directory mode - discover all PDF files
+        pdf_files_to_process = discover_pdf_files(args.pdf_dir)
+        if not pdf_files_to_process:
+            print("No PDF files found to process. Exiting.")
             sys.exit(1)
-        
-        # Update document with full text
-        db_utils.update_document_fulltext(document_id, pdf_text, 0)  # Will update total_chunks later
-        
-        # Split text into chunks
-        chunks = chunk_text(pdf_text, args.chunk_size, args.chunk_overlap)
-        print(f"Text split into {len(chunks)} chunks")
-        
-        # Update document with total chunks
-        db_utils.update_document_fulltext(document_id, pdf_text, len(chunks))
-        
+    
+    # Check if we have files to process
+    if pdf_files_to_process:
         # Check if API keys are available for processing
         if not api_keys:
             print("Error: No API key provided. Please set DEEPSEEK_API_KEY in .env file or provide --api_keys_file")
-            db_utils.update_document_status(document_id, "failed")
             sys.exit(1)
         
-        # Process with LLM - invert the no_translation flag for translate_to_english
-        process_pdf_with_llm(chunks, api_keys, document_id, batch_size=args.batch_size, resume=not args.no_resume, translate_to_english=not args.no_translation)
+        # Process each PDF file
+        total_files = len(pdf_files_to_process)
         
-        # No automatic JSON export - data is stored in database
-        print("\nExtraction completed successfully!")
-        print(f"All data stored in database for document ID: {document_id}")
+        for file_index, pdf_path in enumerate(pdf_files_to_process, 1):
+            print(f"\n{'='*80}")
+            print(f"Processing file {file_index}/{total_files}: {pdf_path}")
+            print(f"{'='*80}")
+            
+            pdf_filename = os.path.basename(pdf_path)
+            
+            # Extract document title from filename if not provided
+            document_title = args.title if args.title else os.path.splitext(pdf_filename)[0]
+            
+            # Check if document already exists in database
+            existing_doc_id = db_utils.get_document_id_by_filename(pdf_filename)
+            if existing_doc_id:
+                print(f"Document already exists in database with ID: {existing_doc_id}")
+                if not args.no_resume:
+                    print("Will resume processing existing document. Use --no_resume to start from scratch.")
+                    document_id = existing_doc_id
+                else:
+                    print("Restarting processing from scratch (--no_resume flag is set)")
+                    # Update status to processing to restart
+                    db_utils.update_document_status(existing_doc_id, "processing")
+                    document_id = existing_doc_id
+            else:
+                # Create document record in database
+                print(f"Creating document record for {pdf_filename}...")
+                document_id = db_utils.create_document(
+                    filename=pdf_filename,
+                    title=document_title,
+                    author=args.author,
+                    file_path=os.path.abspath(pdf_path)
+                )
+                
+                if not document_id:
+                    print(f"Error: Could not create document record in database for {pdf_filename}")
+                    print("Continuing with next file...")
+                    continue
+                
+                print(f"Document ID: {document_id}")
+            
+            try:
+                # Extract text from PDF
+                pdf_text = extract_text_from_pdf(pdf_path)
+                
+                if not pdf_text:
+                    print(f"Error: Could not extract text from PDF {pdf_filename}")
+                    db_utils.update_document_status(document_id, "failed")
+                    print("Continuing with next file...")
+                    continue
+                
+                # Update document with full text
+                db_utils.update_document_fulltext(document_id, pdf_text, 0)  # Will update total_chunks later
+                
+                # Split text into chunks
+                chunks = chunk_text(pdf_text, args.chunk_size, args.chunk_overlap)
+                print(f"Text split into {len(chunks)} chunks")
+                
+                # Update document with total chunks
+                db_utils.update_document_fulltext(document_id, pdf_text, len(chunks))
+                
+                # Process with LLM - invert the no_translation flag for translate_to_english
+                process_pdf_with_llm(chunks, api_keys, document_id, batch_size=args.batch_size, resume=not args.no_resume, translate_to_english=not args.no_translation)
+                
+                # Print completion message for this file
+                print(f"\nSuccessfully processed {pdf_filename} (Document ID: {document_id})")
+            except Exception as e:
+                print(f"Error processing {pdf_filename}: {str(e)}")
+                db_utils.update_document_status(document_id, "failed")
+                print("Continuing with next file...")
+        
+        # Print final summary
+        print(f"\n{'='*80}")
+        print(f"Completed processing {total_files} PDF files")
         print(f"Use --list_documents to see all processed documents")
+        print(f"{'='*80}")
     else:
-        # If no pdf_path and no other action specified, display help
+        # If no pdf_path/pdf_dir and no other action specified, display help
         if not (args.list_documents or args.create_summary or args.create_visualization or args.export_data):
-            print("Error: Please provide either a PDF path to process or use --list_documents, --export_data, --create_summary, or --create_visualization")
+            print("Error: Please provide either a PDF path (--pdf_path) or directory (--pdf_dir) to process")
+            print("Or use --list_documents, --export_data, --create_summary, or --create_visualization")
             print("\nFor help, use: python pdf_wisdom_extractor.py -h")
             sys.exit(1) 

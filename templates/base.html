@@ -153,23 +153,32 @@
         .focus-ring {
             @apply outline-none ring-2 ring-accent-400 ring-opacity-50;
         }
+        
+        /* Dark/Light mode transitions */
+        html.transition,
+        html.transition *,
+        html.transition *:before,
+        html.transition *:after {
+            transition: all 0.3s ease;
+            transition-delay: 0;
+        }
     </style>
     
     {% block head %}{% endblock %}
 </head>
-<body class="bg-grok-900 text-gray-300 min-h-screen flex flex-col transition-colors">
-    <header class="border-b border-grok-800">
+<body class="dark:bg-grok-900 dark:text-gray-300 bg-gray-100 text-gray-800 min-h-screen flex flex-col transition-colors">
+    <header class="dark:border-grok-800 border-gray-200 border-b">
         <div class="max-w-6xl mx-auto px-4 py-3 flex justify-between items-center">
             <div class="flex items-center space-x-2">
                 <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-primary-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                     <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path>
                     <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path>
                 </svg>
-                <h1 class="text-lg font-semibold text-white">PDF Wisdom</h1>
+                <h1 class="text-lg font-semibold dark:text-white text-gray-900">PDF Wisdom</h1>
             </div>
             
             <!-- Theme toggle button -->
-            <button id="theme-toggle" class="p-2 rounded-full hover:bg-grok-800 focus:outline-none">
+            <button id="theme-toggle" class="p-2 rounded-full hover:bg-gray-200 dark:hover:bg-grok-800 focus:outline-none">
                 <!-- Sun icon for dark mode -->
                 <svg id="sun-icon" class="block h-5 w-5 text-yellow-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
@@ -194,8 +203,18 @@
         const sunIcon = document.getElementById('sun-icon');
         const moonIcon = document.getElementById('moon-icon');
         
+        // Add transition class for smooth theme switching
+        function addTransitionClass() {
+            document.documentElement.classList.add('transition');
+            window.setTimeout(() => {
+                document.documentElement.classList.remove('transition');
+            }, 500);
+        }
+        
         // Function to set theme
         function setTheme(isDark) {
+            addTransitionClass();
+            
             if (isDark) {
                 document.documentElement.classList.add('dark');
                 sunIcon.classList.remove('hidden');

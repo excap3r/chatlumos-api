@@ -7,7 +7,7 @@
     <!-- Welcome message/screen -->
     <div id="welcome-screen" class="flex flex-col items-center justify-center h-full animate-fade-in">
         <!-- Logo/Icon -->
-        <div class="mb-6 bg-gradient-radial from-grok-800 to-grok-900 p-10 rounded-full">
+        <div class="mb-6 bg-gradient-radial from-gray-200 to-gray-100 dark:from-grok-800 dark:to-grok-900 p-10 rounded-full">
             <svg xmlns="http://www.w3.org/2000/svg" class="h-16 w-16 text-primary-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path>
                 <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path>
@@ -19,7 +19,7 @@
             PDF Wisdom
         </h1>
         
-        <p class="text-gray-400 max-w-md text-center mb-8">
+        <p class="text-gray-600 dark:text-gray-400 max-w-md text-center mb-8">
             Ask questions about your PDF knowledge base and get intelligent answers powered by vector search.
         </p>
         
@@ -29,13 +29,13 @@
                 <input 
                     type="text" 
                     id="welcome-input"
-                    class="w-full bg-grok-800 border border-grok-700 rounded-xl px-4 py-3 pr-12 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-accent-500/50 focus:border-accent-500 transition-all"
+                    class="w-full bg-white dark:bg-grok-800 border border-gray-300 dark:border-grok-700 rounded-xl px-4 py-3 pr-12 text-gray-800 dark:text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-accent-500/50 focus:border-accent-500 transition-all"
                     placeholder="Ask anything about your documents..."
                     autofocus
                 >
                 <button 
                     id="welcome-send-button"
-                    class="absolute right-3 top-1/2 -translate-y-1/2 text-accent-400 hover:text-accent-300 transition-colors"
+                    class="absolute right-3 top-1/2 -translate-y-1/2 text-accent-500 hover:text-accent-600 dark:text-accent-400 dark:hover:text-accent-300 transition-colors"
                 >
                     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-5 h-5">
                         <path d="M3.478 2.405a.75.75 0 00-.926.94l2.432 7.905H13.5a.75.75 0 010 1.5H4.984l-2.432 7.905a.75.75 0 00.926.94 60.519 60.519 0 0018.445-8.986.75.75 0 000-1.218A60.517 60.517 0 003.478 2.405z" />
@@ -47,31 +47,32 @@
     
     <!-- Chat interface -->
     <div id="chat-interface" class="hidden flex flex-col h-full">
-        <!-- Messages container -->
-        <div id="chat-messages" class="flex-1 overflow-y-auto mb-4 space-y-6">
+        <!-- Messages container with pb to make space for fixed input -->
+        <div id="chat-messages" class="flex-1 overflow-y-auto mb-4 space-y-6 pb-20">
             <!-- Messages will be inserted here by JavaScript -->
         </div>
         
-        <!-- Input form -->
-        <div id="input-container" class="border-t border-grok-800 pt-4">
-            <form id="question-form" class="relative">
-                <textarea 
-                    id="question-input" 
-                    class="w-full bg-grok-800 border border-grok-700 rounded-xl px-4 py-3 pr-12 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-accent-500/50 focus:border-accent-500 resize-none transition-all"
-                    placeholder="Ask a question..."
-                    rows="1"
-                    required
-                ></textarea>
-                <button 
-                    id="send-button"
-                    type="submit" 
-                    class="absolute right-3 top-1/2 -translate-y-1/2 text-accent-400 hover:text-accent-300 disabled:text-gray-600 disabled:cursor-not-allowed transition-colors"
-                >
-                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-5 h-5">
-                        <path d="M3.478 2.405a.75.75 0 00-.926.94l2.432 7.905H13.5a.75.75 0 010 1.5H4.984l-2.432 7.905a.75.75 0 00.926.94 60.519 60.519 0 0018.445-8.986.75.75 0 000-1.218A60.517 60.517 0 003.478 2.405z" />
-                    </svg>
-                </button>
-            </form>
+        <!-- Fixed input form at the bottom -->
+        <div id="input-container" class="fixed bottom-0 left-0 right-0 bg-gray-100 dark:bg-grok-900 border-t border-gray-200 dark:border-grok-800 pt-4 pb-4 px-4 z-10">
+            <div class="max-w-4xl mx-auto w-full">
+                <div id="question-form" class="relative">
+                    <textarea 
+                        id="question-input" 
+                        class="w-full bg-white dark:bg-grok-800 border border-gray-300 dark:border-grok-700 rounded-xl px-4 py-3 pr-12 text-gray-800 dark:text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-accent-500/50 focus:border-accent-500 resize-none transition-all"
+                        placeholder="Ask a question..."
+                        rows="1"
+                    ></textarea>
+                    <button 
+                        id="send-button"
+                        type="button" 
+                        class="absolute right-3 top-1/2 -translate-y-1/2 text-accent-500 hover:text-accent-600 dark:text-accent-400 dark:hover:text-accent-300 disabled:text-gray-400 dark:disabled:text-gray-600 disabled:cursor-not-allowed transition-colors"
+                    >
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-5 h-5">
+                            <path d="M3.478 2.405a.75.75 0 00-.926.94l2.432 7.905H13.5a.75.75 0 010 1.5H4.984l-2.432 7.905a.75.75 0 00.926.94 60.519 60.519 0 0018.445-8.986.75.75 0 000-1.218A60.517 60.517 0 003.478 2.405z" />
+                        </svg>
+                    </button>
+                </div>
+            </div>
         </div>
     </div>
 </div>
@@ -98,6 +99,14 @@
                 this.style.overflowY = 'auto';
             } else {
                 this.style.overflowY = 'hidden';
+            }
+        });
+        
+        // Enter key handler for question input (while allowing shift+enter for new lines)
+        questionInput.addEventListener('keypress', function(e) {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
             }
         });
         
@@ -133,9 +142,13 @@
             }
         }
         
-        // Question form submission
-        questionForm.addEventListener('submit', function(e) {
-            e.preventDefault();
+        // Change form submission to button click
+        sendButton.addEventListener('click', function(e) {
+            sendMessage();
+        });
+        
+        // Centralized function to send messages
+        function sendMessage() {
             const question = questionInput.value.trim();
             
             if (question) {
@@ -146,15 +159,15 @@
                 questionInput.style.height = 'auto';
                 questionInput.focus();
             }
-        });
+        }
         
         // Add a user message to the chat
         function addUserMessage(message) {
             const messageContainer = document.createElement('div');
-            messageContainer.className = 'flex justify-end';
+            messageContainer.className = 'flex justify-end mb-4';
             
             const messageDiv = document.createElement('div');
-            messageDiv.className = 'max-w-[90%] bg-accent-600 text-white px-4 py-3 rounded-2xl rounded-tr-md message-transition';
+            messageDiv.className = 'max-w-[80%] bg-accent-500 dark:bg-accent-600 text-white px-5 py-3 rounded-2xl rounded-tr-md message-transition mr-4';
             messageDiv.textContent = message;
             
             messageContainer.appendChild(messageDiv);
@@ -167,10 +180,10 @@
         // Add an assistant message to the chat
         function addAssistantMessage(message) {
             const messageContainer = document.createElement('div');
-            messageContainer.className = 'flex justify-start';
+            messageContainer.className = 'flex justify-start mb-4';
             
             const messageDiv = document.createElement('div');
-            messageDiv.className = 'max-w-[90%] bg-grok-800 text-white px-4 py-3 rounded-2xl rounded-tl-md message-transition';
+            messageDiv.className = 'max-w-[90%] bg-gray-200 dark:bg-grok-800 text-gray-800 dark:text-white px-5 py-3 rounded-2xl rounded-tl-md message-transition ml-4';
             
             if (message && message.trim() !== '') {
                 messageDiv.textContent = message;
@@ -192,11 +205,11 @@
             messageContainer.id = 'typing-indicator';
             
             const typingDiv = document.createElement('div');
-            typingDiv.className = 'bg-grok-800 px-5 py-4 rounded-2xl rounded-tl-md flex items-center space-x-1';
+            typingDiv.className = 'bg-gray-200 dark:bg-grok-800 px-5 py-4 rounded-2xl rounded-tl-md flex items-center space-x-1';
             
             for (let i = 0; i < 3; i++) {
                 const dot = document.createElement('div');
-                dot.className = 'typing-dot h-2 w-2 bg-gray-400 rounded-full';
+                dot.className = 'typing-dot h-2 w-2 bg-gray-500 dark:bg-gray-400 rounded-full';
                 typingDiv.appendChild(dot);
             }
             
@@ -215,9 +228,84 @@
             }
         }
         
-        // Scroll chat to bottom
+        // Enhanced scroll to bottom function with continuous scrolling behavior
         function scrollToBottom() {
-            chatMessages.scrollTop = chatMessages.scrollHeight;
+            // Force immediate scroll
+            setTimeout(() => {
+                chatMessages.scrollTop = chatMessages.scrollHeight;
+                // Also ensure the whole page is scrolled to the bottom
+                window.scrollTo(0, document.body.scrollHeight);
+            }, 0);
+            
+            // Global observer reference so we can disconnect it properly
+            if (window.currentScrollObserver) {
+                window.currentScrollObserver.disconnect();
+            }
+            
+            // Create a new MutationObserver
+            const observer = new MutationObserver((mutations) => {
+                // Force scroll in next event loop
+                setTimeout(() => {
+                    chatMessages.scrollTop = chatMessages.scrollHeight;
+                    // Also ensure the whole page is scrolled to the bottom
+                    window.scrollTo(0, document.body.scrollHeight);
+                }, 0);
+            });
+            
+            // Store observer reference globally
+            window.currentScrollObserver = observer;
+            
+            // Start observing the chat messages container with all possible options
+            observer.observe(chatMessages, { 
+                childList: true,
+                subtree: true,
+                characterData: true,
+                attributes: true 
+            });
+            
+            // Set up multiple scroll attempts with increasing delays
+            for (let i = 1; i <= 10; i++) {
+                setTimeout(() => {
+                    chatMessages.scrollTop = chatMessages.scrollHeight;
+                    window.scrollTo(0, document.body.scrollHeight);
+                }, i * 100); // 100ms, 200ms, 300ms, etc. up to 1000ms
+            }
+            
+            // Long-running scroll monitoring for streaming responses
+            let scrollMonitorCount = 0;
+            const scrollMonitor = setInterval(() => {
+                // Use RAF to ensure smooth scrolling
+                requestAnimationFrame(() => {
+                    chatMessages.scrollTop = chatMessages.scrollHeight;
+                    window.scrollTo(0, document.body.scrollHeight);
+                });
+                
+                scrollMonitorCount++;
+                
+                // Stop after 20 seconds (200 * 100ms = 20s)
+                if (scrollMonitorCount > 200) {
+                    clearInterval(scrollMonitor);
+                }
+            }, 100);
+            
+            // Store the interval ID so we can clear it when needed
+            if (window.currentScrollMonitor) {
+                clearInterval(window.currentScrollMonitor);
+            }
+            window.currentScrollMonitor = scrollMonitor;
+        }
+        
+        // Function to stop all active scrolling
+        function stopScrolling() {
+            if (window.currentScrollObserver) {
+                window.currentScrollObserver.disconnect();
+                window.currentScrollObserver = null;
+            }
+            
+            if (window.currentScrollMonitor) {
+                clearInterval(window.currentScrollMonitor);
+                window.currentScrollMonitor = null;
+            }
         }
         
         // Create a progress container in an assistant message
@@ -248,21 +336,21 @@
             const stepsToShow = steps.filter(step => step.id !== 'answer');
             
             const stepsContainer = document.createElement('div');
-            stepsContainer.className = 'py-2 px-2 space-y-1 text-sm text-gray-400';
+            stepsContainer.className = 'py-2 px-3 space-y-2 text-sm text-gray-500 dark:text-gray-400';
             
             stepsToShow.forEach(step => {
                 const stepElement = document.createElement('div');
                 stepElement.dataset.stepId = step.id;
                 
                 // Determine status classes
-                let statusClasses = 'text-gray-500';
+                let statusClasses = 'text-gray-400 dark:text-gray-500';
                 let statusIcon = '◦'; // default - not started
                 
                 if (step.status === 'processing') {
-                    statusClasses = 'text-accent-400';
+                    statusClasses = 'text-accent-500 dark:text-accent-400';
                     statusIcon = '◯'; // processing
                 } else if (step.status === 'completed') {
-                    statusClasses = 'text-primary-400';
+                    statusClasses = 'text-primary-500 dark:text-primary-400';
                     statusIcon = '●'; // completed
                 }
                 
@@ -271,6 +359,8 @@
                 const icon = document.createElement('span');
                 icon.textContent = statusIcon;
                 icon.className = step.status === 'processing' ? 'animate-pulse-slow' : '';
+                icon.style.width = '16px'; // Fixed width for consistent alignment
+                icon.style.textAlign = 'center';
                 
                 const text = document.createElement('span');
                 text.textContent = step.name;
@@ -365,6 +455,8 @@
                 // Re-enable input
                 sendButton.disabled = false;
                 questionInput.disabled = false;
+                // Focus back on input for convenience
+                questionInput.focus();
             }
         }
         
@@ -384,6 +476,9 @@
             let isAnswerStreaming = false;
             let answerMessageElement = null;
             let answerContent = '';
+            
+            // Start continuous scrolling for the duration of the stream
+            scrollToBottom();
             
             eventSource.onmessage = function(event) {
                 console.log('Event received:', event.data); // Debug logging
@@ -409,11 +504,31 @@
                             // Update visualization (but don't show the answer step)
                             updateProgressVisualization(progress.containerId, steps);
                             
+                            // For all events, ensure we're scrolled to the bottom
+                            scrollToBottom();
+                            
                             // If answer generation starts, prepare for streaming by creating a new message bubble
+                            // IMPORTANT: Create the answer message bubble immediately after its progress container
                             if (data.step_id === 'answer' && data.status === 'processing') {
                                 isAnswerStreaming = true;
-                                // Create a new message bubble for the answer
-                                answerMessageElement = addAssistantMessage('');
+                                
+                                // Find the progress container element
+                                const progressContainer = document.getElementById(progress.containerId);
+                                
+                                // Create a new message bubble for the answer that will appear after the progress container
+                                answerMessageElement = document.createElement('div');
+                                answerMessageElement.className = 'max-w-[90%] bg-gray-200 dark:bg-grok-800 text-gray-800 dark:text-white rounded-2xl rounded-tl-md message-transition ml-4';
+                                
+                                // Insert the answer element after the progress container's parent (the message div)
+                                if (progressContainer && progressContainer.parentElement) {
+                                    progressContainer.parentElement.appendChild(answerMessageElement);
+                                } else {
+                                    // Fallback if we can't find the progress container
+                                    answerMessageElement = addAssistantMessage('');
+                                }
+                                
+                                // Scroll to bottom to show the new message element
+                                scrollToBottom();
                             }
                         }
                     }
@@ -421,7 +536,7 @@
                         // Handle streaming answer chunks in the dedicated answer bubble
                         if (data.text && data.text !== lastAnswerChunk) {
                             if (!answerMessageElement) {
-                                // Create a message bubble for the answer if it doesn't exist
+                                // Fallback - Create a message bubble for the answer if it doesn't exist
                                 answerMessageElement = addAssistantMessage('');
                             }
                             // Append text to answer content
@@ -444,7 +559,21 @@
                         
                         // Only add the answer if we haven't been streaming it already
                         if (answer && !isAnswerStreaming) {
-                            answerMessageElement = addAssistantMessage(answer);
+                            // Find the progress container element
+                            const progressContainer = document.getElementById(progress.containerId);
+                            
+                            // Create a new message bubble that will appear after the progress container
+                            answerMessageElement = document.createElement('div');
+                            answerMessageElement.className = 'max-w-[90%] bg-gray-200 dark:bg-grok-800 text-gray-800 dark:text-white px-5 py-3 rounded-2xl rounded-tl-md message-transition ml-4';
+                            answerMessageElement.textContent = answer;
+                            
+                            // Insert the answer element after the progress container's parent (the message div)
+                            if (progressContainer && progressContainer.parentElement) {
+                                progressContainer.parentElement.appendChild(answerMessageElement);
+                            } else {
+                                // Fallback if we can't find the progress container
+                                answerMessageElement = addAssistantMessage(answer);
+                            }
                         } else if (isAnswerStreaming && answerMessageElement && !answerContent) {
                             // If streaming was started but no content was received, show the answer
                             answerMessageElement.textContent = answer;
@@ -456,10 +585,32 @@
                         
                         // Close the event stream
                         eventSource.close();
+                        
+                        // Final scroll to bottom
+                        scrollToBottom();
+                        
+                        // Stop continuous scrolling after a delay
+                        setTimeout(() => {
+                            stopScrolling();
+                        }, 1000);
+                        
+                        // Re-focus on input field
+                        questionInput.focus();
                     }
                     else if (data.event === 'complete' || data.event === 'end') {
                         // Close the event stream on completion
                         eventSource.close();
+                        
+                        // Final scroll to bottom
+                        scrollToBottom();
+                        
+                        // Stop continuous scrolling after a delay
+                        setTimeout(() => {
+                            stopScrolling();
+                        }, 1000);
+                        
+                        // Re-focus on input field
+                        questionInput.focus();
                     }
                 } catch (error) {
                     console.error('Error processing event:', error);
@@ -468,6 +619,7 @@
                         addAssistantMessage('Error processing response');
                     }
                     eventSource.close();
+                    stopScrolling();
                 }
             };
             
@@ -479,6 +631,7 @@
                 if (!answerMessageElement) {
                     addAssistantMessage('Sorry, I lost connection. Please try again.');
                 }
+                stopScrolling();
             };
         }
     });
