@@ -1,0 +1,164 @@
+#!/usr/bin/env python3
+"""
+PDF Processor Service - Microservice for PDF text extraction and processing
+
+This service is responsible for:
+1. Extracting text from PDF files
+2. Chunking text into processable segments
+3. Providing an API for other services to request PDF processing
+"""
+
+import os
+import re
+import json
+import argparse
+from typing import List, Dict, Any, Optional, Tuple
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+from dotenv import load_dotenv
+import time
+import datetime
+import pytz
+import sys
+from tqdm import tqdm
+from collections import defaultdict
+import threading
+
+# Try to import PyPDF2
+try:
+    from PyPDF2 import PdfReader
+except ImportError:
+    print("Error: PyPDF2 package not installed. Run 'pip install PyPDF2'")
+    sys.exit(1)
+
+# Try to import tiktoken, but use a fallback if not available
+try:
+    import tiktoken
+    TIKTOKEN_AVAILABLE = True
+except ImportError:
+    TIKTOKEN_AVAILABLE = False
+    print("Warning: tiktoken not available, using simple character-based token estimation")
+
+# Load environment variables from .env file
+load_dotenv()
+
+# Initialize Flask app
+app = Flask(__name__)
+CORS(app)
+
+# Global rate limiting
+api_rate_limits = defaultdict(lambda: {"last_call": 0, "backoff": 0})
+api_lock = threading.Lock()  # Lock for thread-safe API call scheduling
+
+# 1. Extract text from PDF
+def extract_text_from_pdf(pdf_path: str) -> str:
+    """Extract text content from a PDF file."""
+    text = ""
+    try:
+        with open(pdf_path, "rb") as file:
+            pdf_reader = PdfReader(file)
+            for page_num in range(len(pdf_reader.pages)):
+                page = pdf_reader.pages[page_num]
+                text += page.extract_text() + "\n\n"
+        
+        # Clean up text
+        text = re.sub(r'\s+', ' ', text)  # Replace multiple spaces with a single space
+        text = text.strip()
+        
+        print(f"Successfully extracted {len(text)} characters from {pdf_path}")
+        return text
+    except Exception as e:
+        print(f"Error extracting text from PDF: {str(e)}")
+        return ""
+
+# Simple token counter that approximates token count for when tiktoken is not available
+def estimate_tokens(text: str) -> int:
+    """Estimate token count based on simple rules."""
+    # Rough approximation: one token is about 4 characters on average
+    return len(text) // 4
+
+# 2. Split text into smaller, processable chunks
+def chunk_text(text: str, chunk_size: int = 1000, overlap: int = 200) -> List[str]:
+    """Split the text into overlapping chunks of specified size."""
+    words = text.split()
+    if not words:
+        return []
+    
+    chunks = []
+    i = 0
+    while i < len(words):
+        # Get chunk of words with specified size
+        chunk = words[i:i + chunk_size]
+        # Join words back into text
+        chunks.append(" ".join(chunk))
+        # Move to next chunk, considering overlap
+        i += (chunk_size - overlap)
+    
+    # Ensure minimum meaningful size
+    return [chunk for chunk in chunks if len(chunk.split()) > 10]
+
+# API Routes
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Health check endpoint"""
+    return jsonify({"status": "healthy", "service": "pdf-processor"})
+
+@app.route('/extract', methods=['POST'])
+def extract_pdf():
+    """Extract text from a PDF file"""
+    if 'file' not in request.files:
+        return jsonify({"error": "No file provided"}), 400
+    
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({"error": "No file selected"}), 400
+    
+    if not file.filename.lower().endswith('.pdf'):
+        return jsonify({"error": "File must be a PDF"}), 400
+    
+    # Save the file temporarily
+    temp_path = f"/tmp/{file.filename}"
+    file.save(temp_path)
+    
+    # Extract text
+    text = extract_text_from_pdf(temp_path)
+    
+    # Remove temporary file
+    os.remove(temp_path)
+    
+    if not text:
+        return jsonify({"error": "Failed to extract text from PDF"}), 500
+    
+    return jsonify({
+        "text": text,
+        "characters": len(text),
+        "estimated_tokens": estimate_tokens(text)
+    })
+
+@app.route('/chunk', methods=['POST'])
+def chunk_pdf_text():
+    """Chunk text into smaller segments"""
+    data = request.json
+    if not data or 'text' not in data:
+        return jsonify({"error": "No text provided"}), 400
+    
+    chunk_size = data.get('chunk_size', 1000)
+    overlap = data.get('overlap', 200)
+    
+    chunks = chunk_text(data['text'], chunk_size, overlap)
+    
+    return jsonify({
+        "chunks": chunks,
+        "count": len(chunks)
+    })
+
+if __name__ == "__main__":
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description="PDF Processor Service")
+    parser.add_argument('--host', type=str, default='0.0.0.0', help='Host to run the service on')
+    parser.add_argument('--port', type=int, default=5001, help='Port to run the service on')
+    parser.add_argument('--debug', action='store_true', help='Run in debug mode')
+    args = parser.parse_args()
+    
+    # Run the Flask app
+    app.run(host=args.host, port=args.port, debug=args.debug)
