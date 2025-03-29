@@ -12,10 +12,16 @@ torch>=1.13.0
 sentence-transformers>=2.2.2
 # For translation and language detection
 deep-translator>=1.10.1
-# Web application
+# API server
 Flask>=2.0.1
 Flask-CORS>=3.0.10
 gunicorn>=20.1.0
+# Caching and optimization
+redis>=4.5.5
+# Logging and monitoring
+structlog>=23.1.0
+# Production-ready WSGI server
+gevent>=22.10.2
 # Visualization
 plotly>=5.10.0
 pandas>=1.5.0 

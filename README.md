@@ -166,6 +166,110 @@ python mysql_to_vector.py
 python wisdom_qa.py --interactive
 ```
 
+## API Authentication
+
+The PDF Wisdom Extractor API now includes a complete authentication system for secure access to its endpoints. This system supports:
+
+- User registration and login
+- JWT-based authentication
+- API key management 
+- Role-based access control
+- Permission-based authorization
+
+### Authentication Endpoints
+
+The API provides the following authentication endpoints:
+
+- `POST /api/v1/auth/register` - Register a new user
+- `POST /api/v1/auth/login` - Authenticate and get access tokens
+- `POST /api/v1/auth/refresh` - Refresh expired access tokens
+- `POST /api/v1/auth/api-keys` - Create a new API key
+- `GET /api/v1/auth/api-keys` - List all API keys for the current user
+- `DELETE /api/v1/auth/api-keys/{key_id}` - Revoke an API key
+- `GET /api/v1/auth/users` - List all users (admin only)
+- `PUT /api/v1/auth/users/{user_id}/roles` - Update user roles (admin only)
+
+### Authentication Methods
+
+The API supports two authentication methods:
+
+1. **JWT tokens** - For interactive sessions
+   - Obtained via login endpoint
+   - Must be included in `Authorization` header as `Bearer <token>`
+   - Access tokens expire after 1 hour by default
+   - Refresh tokens can be used to get new access tokens
+
+2. **API keys** - For programmatic access
+   - Created via the API key endpoint
+   - Can be included in request header as `X-API-Key` or `Authorization: ApiKey <key>`
+   - Can be included as a query parameter `?api_key=<key>`
+   - No expiration by default (can be revoked)
+
+### User Roles and Permissions
+
+The authentication system supports role-based access control:
+
+- **User** - Basic access to the API
+- **Admin** - Full access to all endpoints
+- **Custom roles** - Can be defined and assigned by admins
+
+### Environment Configuration
+
+Authentication-related environment variables:
+
+```
+# Authentication settings
+JWT_SECRET=<secure-random-string>
+JWT_ACCESS_TOKEN_EXPIRE_SECONDS=3600
+JWT_REFRESH_TOKEN_EXPIRE_SECONDS=2592000
+
+# Database configuration for user storage
+DB_HOST=localhost
+DB_PORT=3306
+DB_USER=wisdom_user
+DB_PASSWORD=wisdom_password
+DB_NAME=wisdom_db
+DB_POOL_SIZE=10
+```
+
+### Setup with Docker
+
+The authentication system is fully integrated with the Docker setup:
+
+```bash
+# Generate a secure JWT secret
+export JWT_SECRET=$(openssl rand -hex 32)
+
+# Start the services with Docker Compose
+docker-compose up -d
+```
+
+### Authentication Example
+
+```bash
+# Register a new user
+curl -X POST http://localhost:5000/api/v1/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"username": "user1", "password": "password123", "email": "user1@example.com"}'
+
+# Login and get tokens
+curl -X POST http://localhost:5000/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username": "user1", "password": "password123"}'
+
+# Use the access token to make authenticated requests
+curl -X POST http://localhost:5000/api/v1/auth/api-keys \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <access_token>" \
+  -d '{"name": "My API Key"}'
+
+# Use the API key to make authenticated requests
+curl -X POST http://localhost:5000/api/v1/ask \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: <api_key>" \
+  -d '{"question": "What is the nature of reality?"}'
+```
+
 ## Required Packages
 
 Create a `requirements.txt` file with:
