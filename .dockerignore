@@ -1,0 +1,50 @@
+# Git files
+.git
+.gitignore
+
+# Python virtual environment
+venv/
+.venv/
+*/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE / Editor specific
+.idea/
+.vscode/
+*.swp
+*~
+
+# Secrets / Credentials - IMPORTANT! Add any other sensitive files here.
+.env
+.env.*
+! .env.example
+! .env.template
+
+# Documentation / Task files
+docs/
+mkdocs.yml
+site/
+ide/
+
+# Tests (unless needed for a specific build stage)
+tests/
+pytest.ini
+
+# Other build artifacts / logs
+*.log
+*.log.*
+*.sqlite3 # Example, if you use local sqlite dbs for testing/dev
+
+# README (usually not needed in image)
+README.md 

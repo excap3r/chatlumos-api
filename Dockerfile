@@ -1,36 +1,55 @@
-FROM python:3.10-slim
+# Stage 1: Build stage
+FROM python:3.10-slim AS builder
 
-# Set working directory
 WORKDIR /app
 
-# Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app \
     PIP_NO_CACHE_DIR=off \
     PIP_DISABLE_PIP_VERSION_CHECK=on
 
-# Install system dependencies
+# Install build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     gcc \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Create a non-root user to run the application
-RUN groupadd -g 1000 appuser && \
-    useradd -u 1000 -g appuser -s /bin/bash -m appuser
-
 # Install Python dependencies
 COPY requirements.txt .
 RUN pip install --upgrade pip && \
-    pip install -r requirements.txt
+    pip install --no-warn-script-location --prefix=/install -r requirements.txt
 
-# Copy application code
-COPY . .
+# Stage 2: Final stage
+FROM python:3.10-slim
+
+# Create a non-root user to run the application
+RUN groupadd -g 1000 appuser && \
+    useradd -u 1000 -g appuser -s /bin/sh -m appuser # Use /bin/sh for smaller footprint
+
+WORKDIR /app
+
+# Add installed packages to PATH
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/install/bin:$PATH"
+
+# Copy installed dependencies from builder stage
+COPY --from=builder /install /install
+
+# Copy application code (be specific)
+COPY alembic.ini .
+COPY app.py .
+COPY celery_app.py .
+COPY gunicorn_config.py .
+COPY services/ services/
+# Add other necessary files/dirs like migrations if needed at runtime
+COPY migrations/ migrations/
 
 # Set proper permissions
-RUN chown -R appuser:appuser /app
+# Ensure ownership is changed before switching user
+RUN chown -R appuser:appuser /app /install
 
 # Switch to non-root user
 USER appuser
