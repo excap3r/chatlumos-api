@@ -7,11 +7,11 @@ This module provides standardized error handling and custom exception classes.
 
 import sys
 import traceback
-import logging
+import structlog
 from typing import Dict, Any, Optional, Tuple, Callable
 
 # Initialize logger
-logger = logging.getLogger('error_utils')
+logger = structlog.get_logger(__name__)
 
 class APIError(Exception):
     """Base class for API-related errors."""
@@ -66,6 +66,16 @@ class ValidationError(APIError):
             
         return error_dict
 
+class DatabaseError(APIError):
+    """Error for database operation failures."""
+    def __init__(self, message: str = "Database operation failed", details: Any = None):
+        super().__init__(message, status_code=500, details=details)
+
+class NotFoundError(APIError):
+    """Error when a requested resource is not found."""
+    def __init__(self, message: str = "Resource not found", details: Any = None):
+        super().__init__(message, status_code=404, details=details)
+
 def handle_error(func: Callable) -> Callable:
     """
     Decorator for API endpoint error handling.
@@ -79,24 +89,31 @@ def handle_error(func: Callable) -> Callable:
     Returns:
         Decorated function with error handling
     """
+    error_logger = logger
+    
     def wrapper(*args, **kwargs):
         try:
             return func(*args, **kwargs)
         except APIError as e:
-            # Log API errors
-            logger.error(f"API Error: {str(e)}")
+            # Log API errors with details
+            error_logger.warning("API Error occurred", 
+                                 error_message=e.message, 
+                                 status_code=e.status_code, 
+                                 details=e.details, 
+                                 exception_type=type(e).__name__)
             return e.to_dict(), e.status_code
         except Exception as e:
-            # Log unexpected errors
-            error_traceback = traceback.format_exc()
-            logger.error(f"Unexpected error: {str(e)}\n{error_traceback}")
+            # Log unexpected errors with traceback
+            error_logger.error("Unexpected server error occurred", 
+                               error=str(e), 
+                               exception_type=type(e).__name__,
+                               exc_info=True)
             
             # Return generic error response
-            return {
+            generic_error_response = {
                 "error": "Internal server error",
-                "status_code": 500,
-                "details": str(e)
-            }, 500
+            }
+            return generic_error_response, 500
     
     return wrapper
 

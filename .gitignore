@@ -30,3 +30,6 @@ ENV/
 Thumbs.db 
 
 pdfs/
+
+# MkDocs build output
+site/

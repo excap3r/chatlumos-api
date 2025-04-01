@@ -6,7 +6,7 @@ This module provides Flask middleware for tracking API requests.
 """
 
 import time
-import logging
+import structlog
 from functools import wraps
 from flask import request, g, Flask
 from typing import Callable, Any
@@ -14,7 +14,7 @@ from typing import Callable, Any
 from .analytics_service import AnalyticsEvent, track_event, track_api_call
 
 # Set up logging
-logger = logging.getLogger("analytics_middleware")
+logger = structlog.get_logger("analytics_middleware")
 
 def setup_analytics_tracking(app: Flask) -> None:
     """
@@ -33,21 +33,24 @@ def setup_analytics_tracking(app: Flask) -> None:
         """Track API request after it completes."""
         if hasattr(g, 'start_time'):
             # Store status code for tracking
-            request._status_code = response.status_code
+            g._response_status_code = response.status_code
             
             # Store error if applicable
             if response.status_code >= 400:
                 try:
                     error_data = response.get_json()
-                    request._error = error_data.get('error') if error_data else f"HTTP {response.status_code}"
+                    g._response_error = error_data.get('error') if error_data else f"HTTP {response.status_code}"
                 except:
-                    request._error = f"HTTP {response.status_code}"
+                    g._response_error = f"HTTP {response.status_code}"
             
             # Track the API call
             try:
                 track_api_call(g.start_time)
             except Exception as e:
-                logger.error(f"Error tracking API call: {e}")
+                logger.error("Error tracking API call analytics event", 
+                             error=str(e), 
+                             path=request.path, 
+                             exc_info=True)
                 
         return response
     
@@ -56,21 +59,31 @@ def setup_analytics_tracking(app: Flask) -> None:
         """Track unhandled exceptions."""
         try:
             # Create error event
+            user_id = g.get('user', {}).get('id') if hasattr(g, 'user') else None
             event = AnalyticsEvent(
                 event_type=AnalyticsEvent.ERROR,
-                endpoint=request.path,
-                user_id=g.get('user', {}).get('id') if hasattr(g, 'user') else None,
+                endpoint=request.path if request else None,
+                user_id=user_id,
                 error=str(e),
+                status_code=500, # Unhandled exceptions usually result in 500
                 metadata={
                     "exception_type": e.__class__.__name__,
-                    "query_params": dict(request.args),
-                    "content_type": request.content_type
+                    "request_args": dict(request.args) if request else None,
+                    "request_path": request.path if request else None
                 }
             )
             
             track_event(event)
+            logger.warning("Unhandled exception tracked", 
+                         exc_type=e.__class__.__name__, 
+                         error=str(e), 
+                         path=request.path if request else None, 
+                         user_id=user_id)
         except Exception as tracking_error:
-            logger.error(f"Error tracking exception: {tracking_error}")
+            logger.error("Error tracking unhandled exception", 
+                         tracking_error=str(tracking_error), 
+                         original_error=str(e), 
+                         exc_info=True)
         
         # Re-raise the exception for normal handling
         raise e
@@ -90,43 +103,70 @@ def track_specific_event(event_type: str, include_payload: bool = False) -> Call
         @wraps(f)
         def wrapped(*args: Any, **kwargs: Any) -> Any:
             # Call the original function
-            result = f(*args, **kwargs)
-            
             try:
-                # Extract metadata
+                result = f(*args, **kwargs)
+            except Exception as func_exc:
+                 # Log and track error if the decorated function fails
+                 user_id = g.get('user', {}).get('id') if hasattr(g, 'user') else None
+                 logger.error("Exception in tracked function", 
+                              event_type=event_type, 
+                              function_name=f.__name__, 
+                              error=str(func_exc), 
+                              exc_info=True)
+                 try:
+                     error_event = AnalyticsEvent(
+                         event_type=AnalyticsEvent.ERROR, # Log as error type
+                         endpoint=request.path,
+                         user_id=user_id,
+                         error=f"Error in {event_type}: {str(func_exc)}",
+                         metadata={'original_event_type': event_type}
+                     )
+                     track_event(error_event)
+                 except Exception as tracking_error:
+                     logger.error("Error tracking exception within decorator", 
+                                  tracking_error=str(tracking_error), 
+                                  exc_info=True)
+                 raise func_exc # Re-raise the original exception
+            
+            # If function succeeded, track the specific event
+            try:
                 metadata = {}
+                if include_payload and request.is_json:
+                    try:
+                        safe_payload = request.get_json() if request.is_json else {}
+                        if isinstance(safe_payload, dict):
+                             # Remove sensitive fields
+                             for field in ['password', 'token', 'secret', 'key', 'api_key', 'authorization']:
+                                 if field in safe_payload:
+                                     safe_payload[field] = '[REDACTED]'
+                             metadata['payload'] = safe_payload
+                        elif isinstance(safe_payload, list): # Handle list payloads if necessary
+                             metadata['payload_preview'] = f"List payload, length: {len(safe_payload)}"
+                        else:
+                             metadata['payload_type'] = type(safe_payload).__name__
+                    except Exception as json_err:
+                        logger.warning("Failed to parse JSON payload for tracking", error=str(json_err))
+                        metadata['payload_error'] = str(json_err)
                 
-                if include_payload and request.json:
-                    # Include only non-sensitive payload data
-                    safe_payload = request.json.copy() if isinstance(request.json, dict) else {}
-                    
-                    # Remove sensitive fields
-                    for field in ['password', 'token', 'secret', 'key', 'api_key', 'authorization']:
-                        if field in safe_payload:
-                            safe_payload[field] = '[REDACTED]'
-                    
-                    metadata['payload'] = safe_payload
+                status_code = 200 # Default success
+                if hasattr(result, 'status_code'):
+                    status_code = result.status_code
+                elif isinstance(result, tuple) and len(result) > 1 and isinstance(result[1], int):
+                    status_code = result[1] # Handle Flask tuple response (body, status)
                 
-                # Add result info if available and not too large
-                if hasattr(result, 'get_json'):
-                    result_json = result.get_json()
-                    if result_json and isinstance(result_json, dict):
-                        # Include only status info, not full response data
-                        if 'status' in result_json:
-                            metadata['result_status'] = result_json['status']
-                
-                # Create event
                 event = AnalyticsEvent(
                     event_type=event_type,
                     endpoint=request.path,
                     user_id=g.get('user', {}).get('id') if hasattr(g, 'user') else None,
-                    status_code=result.status_code if hasattr(result, 'status_code') else 200,
+                    status_code=status_code,
                     metadata=metadata
                 )
-                
                 track_event(event)
             except Exception as e:
-                logger.error(f"Error tracking specific event: {e}")
+                logger.error("Error tracking specific analytics event", 
+                             event_type=event_type,
+                             error=str(e), 
+                             exc_info=True) 
             
             return result
         return wrapped

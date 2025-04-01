@@ -7,177 +7,229 @@ login, logout, token refresh, and API key management.
 """
 
 import logging
-from flask import Blueprint, request, jsonify, g
+import structlog
+from flask import Blueprint, request, jsonify, g, current_app
 from typing import Dict, Any, List, Optional, Tuple
+from functools import wraps
+import re # Added for password regex
+import time # Added time for Redis expiry calculation
+
+# Import Pydantic for validation
+from pydantic import BaseModel, EmailStr, Field, validator, ValidationError as PydanticValidationError
 
 # Import authentication utilities
-from ..utils.auth_utils import (
-    create_token,
-    hash_password,
-    verify_password,
-    generate_api_key,
-    hash_api_key,
-    MissingSecretError,
-    InvalidTokenError,
-    ExpiredTokenError
+from ..utils.auth_utils import create_token, decode_token, MissingSecretError, InvalidTokenError, ExpiredTokenError
+
+# Import User Service
+from ..user_service import (
+    register_new_user,
+    login_user,
+    add_api_key as service_add_api_key,
+    get_keys_for_user as service_get_keys_for_user,
+    remove_api_key as service_remove_api_key,
+    get_all_users_list as service_get_all_users,
+    update_user_roles_by_id as service_update_user_roles,
 )
 
-# Import database services
-from ..db.user_db import (
-    create_user,
-    authenticate_user,
-    create_api_key as db_create_api_key,
-    get_user_api_keys,
-    revoke_api_key,
-    UserAlreadyExistsError,
-    InvalidCredentialsError,
-    UserNotFoundError
-)
+# Import specific exceptions used for flow control or specific responses
+from ..db.exceptions import DuplicateUserError, InvalidCredentialsError, UserNotFoundError, DatabaseError
 
 # Import middleware
-from ..auth_middleware import auth_required, admin_required
+from .middleware.auth_middleware import auth_required, admin_required
 
-# Set up logging
-logger = logging.getLogger("auth_routes")
+# Import base error class
+from ..utils.error_utils import APIError, ValidationError
+
+# Configure logger
+logger = structlog.get_logger(__name__)
 
 # Create Blueprint
 auth_bp = Blueprint("auth", __name__)
 
+# --- Pydantic Schemas ---
+
+def validate_password_complexity(password: str) -> str:
+    """Custom validator for password complexity."""
+    if len(password) < 8:
+        raise ValueError('Password must be at least 8 characters long')
+    if not re.search(r"[a-z]", password):
+        raise ValueError('Password must contain a lowercase letter')
+    if not re.search(r"[A-Z]", password):
+        raise ValueError('Password must contain an uppercase letter')
+    if not re.search(r"\d", password):
+        raise ValueError('Password must contain a digit')
+    if not re.search(r"[!@#$%^&*(),.?\":{}|<>]", password):
+        raise ValueError('Password must contain a special character')
+    return password
+
+class UserRegistrationSchema(BaseModel):
+    username: str = Field(..., min_length=3)
+    email: EmailStr
+    password: str
+
+    _validate_password = validator('password', allow_reuse=True)(validate_password_complexity)
+
+class UserLoginSchema(BaseModel):
+    username: str
+    password: str
+
+# --- API Routes ---
+
 @auth_bp.route("/register", methods=["POST"])
 def register():
     """
-    Register a new user.
-    
-    Request Body:
-        username: User's username
-        password: User's password
-        email: User's email
-        
+    Register a new user. Validates input using Pydantic.
+
+    Request Body (JSON):
+        username: User's username (min 3 chars)
+        email: User's valid email address
+        password: User's password (min 8 chars, incl. upper, lower, digit, symbol)
+
     Returns:
         201: User created successfully
-        400: Invalid request
+        400: Invalid request data (validation error)
         409: Username or email already exists
+        500: Server error
     """
-    data = request.get_json()
-    
-    # Validate request data
-    if not data:
-        return jsonify({"error": "Invalid request", "message": "Request body is required"}), 400
-    
-    username = data.get("username")
-    password = data.get("password")
-    email = data.get("email")
-    
-    if not all([username, password, email]):
-        return jsonify({
-            "error": "Invalid request", 
-            "message": "Username, password, and email are required"
-        }), 400
-    
-    # Hash password
-    password_hash, salt = hash_password(password)
-    
     try:
-        # Create user in database
-        user_id = create_user(
+        # Validate request data using Pydantic
+        payload = request.get_json()
+        if not payload:
+            raise ValidationError("Request body cannot be empty.")
+        
+        user_data = UserRegistrationSchema.model_validate(payload)
+        username = user_data.username
+        email = user_data.email
+        password = user_data.password
+
+        logger.info("Registration request validation successful", username=username, email=email)
+
+        # Call user service to handle registration (incl. hashing)
+        user_id = register_new_user(
             username=username,
             email=email,
-            password_hash=password_hash,
-            password_salt=salt,
-            # Default role is 'user'
-            roles=["user"]
+            password=password
+            # Roles default to ['user'] in service
         )
-        
+
+        logger.info("User registered successfully", user_id=user_id, username=username)
         return jsonify({
             "message": "User registered successfully",
             "user_id": user_id
         }), 201
-        
-    except UserAlreadyExistsError as e:
-        return jsonify({
-            "error": "User already exists",
-            "message": str(e)
-        }), 409
-    except Exception as e:
-        logger.error(f"Error creating user: {str(e)}")
-        return jsonify({
-            "error": "Server error",
-            "message": "Failed to create user"
-        }), 500
+
+    except PydanticValidationError as e:
+        logger.warning("Registration validation failed", errors=e.errors())
+        # Use the custom ValidationError for consistent error responses
+        raise ValidationError(f"Input validation failed: {e.errors()}") # Pass Pydantic errors
+
+    except DuplicateUserError as e:
+        logger.warning("Registration failed: Duplicate user", username=username, email=email)
+        raise APIError(str(e), status_code=409)
+
+    except DatabaseError as e: # Catch potential DB errors during user creation
+        logger.error("Database error during registration", username=username, error=str(e), exc_info=True)
+        raise APIError("Failed to register user due to a database issue.", status_code=500)
+
+    except Exception as e: # Generic catch-all for unexpected errors
+        logger.error("Unexpected error during registration", username=username if 'username' in locals() else 'unknown', error=str(e), exc_info=True)
+        raise APIError("An unexpected error occurred during registration.", status_code=500)
 
 @auth_bp.route("/login", methods=["POST"])
 def login():
     """
-    Authenticate user and return access and refresh tokens.
-    
-    Request Body:
+    Authenticate user and return access and refresh tokens. Validates input using Pydantic.
+
+    Request Body (JSON):
         username: User's username
         password: User's password
-        
+
     Returns:
         200: Authentication successful
-        400: Invalid request
+        400: Invalid request data (validation error)
         401: Invalid credentials
+        500: Server error
     """
-    data = request.get_json()
-    
-    # Validate request data
-    if not data:
-        return jsonify({"error": "Invalid request", "message": "Request body is required"}), 400
-    
-    username = data.get("username")
-    password = data.get("password")
-    
-    if not all([username, password]):
-        return jsonify({
-            "error": "Invalid request", 
-            "message": "Username and password are required"
-        }), 400
-    
     try:
-        # Authenticate user
-        user = authenticate_user(username, password)
-        
+        # Validate request data using Pydantic
+        payload = request.get_json()
+        if not payload:
+            raise ValidationError("Request body cannot be empty.")
+
+        login_data = UserLoginSchema.model_validate(payload)
+        username = login_data.username
+        password = login_data.password
+
+        logger.info("Login request validation successful", username=username)
+
+        # Call user service to handle authentication
+        user = login_user(username, password)
+
         # Generate tokens
-        access_token = create_token(
-            user_id=user["id"],
-            username=user["username"],
-            type="access",
-            roles=user["roles"],
-            permissions=user["permissions"]
-        )
-        
-        refresh_token = create_token(
-            user_id=user["id"],
-            username=user["username"],
-            type="refresh"
-        )
-        
+        # Ensure create_token handles potential errors (e.g., missing secret)
+        try:
+            access_token = create_token(
+                user_id=user["id"],
+                username=user["username"],
+                type="access",
+                roles=user.get("roles", []), # Use .get for safety
+                permissions=user.get("permissions", []) # Use .get for safety
+            )
+
+            refresh_token = create_token(
+                user_id=user["id"],
+                username=user["username"],
+                type="refresh"
+                # No roles/permissions needed in refresh usually
+            )
+        except MissingSecretError as e:
+             logger.critical("JWT Secret Key is missing or invalid!", error=str(e), exc_info=True)
+             raise APIError("Server configuration error: Cannot generate tokens.", status_code=500)
+        except Exception as e: # Catch other potential token errors
+             logger.error("Token generation failed", user_id=user.get("id"), username=username, error=str(e), exc_info=True)
+             raise APIError("Failed to generate authentication tokens.", status_code=500)
+
+
+        logger.info("User logged in successfully", user_id=user["id"], username=user["username"])
+
+        # Prepare user data for response (avoid sending sensitive info like hash/salt)
+        # Get expiry for the access token to return in response
+        access_token_expires_in = current_app.config.get('ACCESS_TOKEN_EXPIRES', 3600)
+
+        user_response = {
+            "id": user["id"],
+            "username": user["username"],
+            "roles": user.get("roles", []),
+            "permissions": user.get("permissions", [])
+        }
+
         return jsonify({
             "access_token": access_token,
             "refresh_token": refresh_token,
             "token_type": "bearer",
-            "expires_in": 3600,  # 1 hour
-            "user": {
-                "id": user["id"],
-                "username": user["username"],
-                "email": user["email"],
-                "roles": user["roles"],
-                "permissions": user["permissions"]
-            }
+            "expires_in": access_token_expires_in,
+            "user": user_response
         }), 200
-        
-    except InvalidCredentialsError:
-        return jsonify({
-            "error": "Invalid credentials",
-            "message": "Invalid username or password"
-        }), 401
-    except Exception as e:
-        logger.error(f"Error during login: {str(e)}")
-        return jsonify({
-            "error": "Server error",
-            "message": "Authentication failed"
-        }), 500
+
+    except PydanticValidationError as e:
+        logger.warning("Login validation failed", errors=e.errors())
+        raise ValidationError(f"Input validation failed: {e.errors()}")
+
+    except InvalidCredentialsError as e:
+        logger.warning(f"Login failed for user {username}: Invalid credentials") # Avoid logging password
+        raise APIError("Invalid username or password", status_code=401)
+
+    except UserNotFoundError as e: # Assuming authenticate_user might raise this
+        logger.warning(f"Login failed: User not found - {username}")
+        raise APIError("Invalid username or password", status_code=401) # Same message as invalid creds for security
+
+    except DatabaseError as e: # Catch potential DB errors during authentication
+        logger.error("Database error during login", username=username, error=str(e), exc_info=True)
+        raise APIError("Failed to login due to a database issue.", status_code=500)
+
+    except Exception as e: # Generic catch-all
+        logger.error("Unexpected error during login", username=username if 'username' in locals() else 'unknown', error=str(e), exc_info=True)
+        raise APIError("An unexpected error occurred during login.", status_code=500)
 
 @auth_bp.route("/refresh", methods=["POST"])
 def refresh_token():
@@ -188,172 +240,107 @@ def refresh_token():
         refresh_token: Refresh token
         
     Returns:
-        200: Token refreshed successfully
+        200: Tokens refreshed successfully (new access and refresh token)
         400: Invalid request
-        401: Invalid or expired token
+        401: Invalid or expired token, or token reuse detected
+        500: Server error (e.g., Redis connection)
     """
     data = request.get_json()
-    
-    # Validate request data
+    redis_client = current_app.redis_client # Get Redis client from app context
+
+    if not redis_client:
+        logger.error("Redis client not configured or available for token refresh.")
+        raise APIError("Server configuration error: Cannot process token refresh.", status_code=500)
+
+    # Validate request data presence
     if not data:
-        return jsonify({"error": "Invalid request", "message": "Request body is required"}), 400
-    
+        raise ValidationError("Request body is required")
+
     refresh_token = data.get("refresh_token")
-    
+
     if not refresh_token:
-        return jsonify({
-            "error": "Invalid request", 
-            "message": "Refresh token is required"
-        }), 400
-    
+        raise ValidationError("Refresh token is required")
+
     try:
-        # Decode refresh token
-        from ..utils.auth_utils import decode_token
+        # Decode refresh token (raises exceptions on failure)
         payload = decode_token(refresh_token)
-        
-        # Verify token type
+        user_id = payload["sub"]
+        username = payload["username"]
+        token_jti = payload["jti"]
+        token_exp = payload["exp"]
+
+        # 1. Check if this token JTI is already invalidated in Redis
+        invalidation_key = f"invalidated_jti:{token_jti}"
+        if redis_client.exists(invalidation_key):
+            logger.warning("Attempted reuse of invalidated refresh token", jti=token_jti, user_id=user_id)
+            raise APIError("Invalid token: Potential reuse detected.", status_code=401)
+
+        # 2. Verify token type
         if payload.get("type") != "refresh":
-            return jsonify({
-                "error": "Invalid token",
-                "message": "Token is not a refresh token"
-            }), 401
-        
-        # Generate new access token
-        access_token = create_token(
-            user_id=payload["sub"],
-            username=payload["username"],
-            type="access",
-            roles=payload.get("roles", []),
-            permissions=payload.get("permissions", [])
-        )
-        
+            logger.warning("Attempted refresh with non-refresh token type", jti=token_jti, user_id=user_id, type=payload.get("type"))
+            raise APIError("Invalid token type for refresh operation.", status_code=401)
+
+        # 3. Invalidate the used refresh token in Redis
+        # Calculate remaining validity time for the Redis key expiry
+        # Add a small buffer (e.g., 60s) to ensure it outlives the token slightly
+        now = int(time.time())
+        redis_expiry_seconds = max(60, token_exp - now + 60) # Ensure minimum 60s expiry
+        try:
+            redis_client.setex(invalidation_key, redis_expiry_seconds, "invalidated")
+            logger.info("Invalidated used refresh token", jti=token_jti, user_id=user_id, expiry_seconds=redis_expiry_seconds)
+        except Exception as redis_error: # Catch potential Redis errors
+            logger.error("Failed to invalidate refresh token in Redis", jti=token_jti, user_id=user_id, error=str(redis_error), exc_info=True)
+            # Decide if this should be fatal. For now, proceed but log critically.
+            # If Redis is critical for security, raise APIError(..., 500) here.
+
+        # 4. Generate *new* access token and *new* refresh token
+        try:
+            new_access_token = create_token(
+                user_id=user_id,
+                username=username,
+                type="access",
+                # Get roles/permissions from the *original* refresh token payload
+                # Or potentially re-fetch from DB if roles can change rapidly?
+                # For now, assume roles/permissions in refresh token are sufficient
+                roles=payload.get("roles", []),
+                permissions=payload.get("permissions", [])
+            )
+            new_refresh_token = create_token(
+                user_id=user_id,
+                username=username,
+                type="refresh"
+                # No roles/permissions needed in refresh token itself usually
+            )
+        except (MissingSecretError, RuntimeError) as token_error:
+            logger.critical("Failed to generate new tokens during refresh", user_id=user_id, error=str(token_error), exc_info=True)
+            # This is a server error if token generation fails
+            raise APIError("Server error: Could not generate new tokens.", status_code=500)
+
+        # 5. Return both tokens
+        # Get expiry for the access token to return in response
+        access_token_expires_in = current_app.config.get('ACCESS_TOKEN_EXPIRES', 3600)
+
+        logger.info("Token refresh successful, new tokens issued", user_id=user_id)
         return jsonify({
-            "access_token": access_token,
+            "access_token": new_access_token,
+            "refresh_token": new_refresh_token, # Return the NEW refresh token
             "token_type": "bearer",
-            "expires_in": 3600  # 1 hour
+            "expires_in": access_token_expires_in
         }), 200
-        
+
+    # Catch specific exceptions from decode_token
     except (InvalidTokenError, ExpiredTokenError, MissingSecretError) as e:
-        return jsonify({
-            "error": "Invalid token",
-            "message": str(e)
-        }), 401
-    except Exception as e:
-        logger.error(f"Error refreshing token: {str(e)}")
-        return jsonify({
-            "error": "Server error",
-            "message": "Failed to refresh token"
-        }), 500
+        logger.warning(f"Token refresh failed: {type(e).__name__}", error=str(e))
+        # Use a generic message for security
+        raise APIError(f"Invalid or expired refresh token.", status_code=401)
 
-@auth_bp.route("/api-keys", methods=["POST"])
-@auth_required()
-def create_api_key():
-    """
-    Create a new API key for the authenticated user.
-    
-    Request Body:
-        name: Name/description for the API key
-        
-    Returns:
-        201: API key created successfully
-        400: Invalid request
-        401: Unauthorized
-    """
-    data = request.get_json()
-    
-    # Validate request data
-    if not data:
-        return jsonify({"error": "Invalid request", "message": "Request body is required"}), 400
-    
-    name = data.get("name", "API Key")
-    
-    # Generate API key
-    api_key = generate_api_key()
-    api_key_hash = hash_api_key(api_key)
-    
-    try:
-        # Save API key to database
-        key_id = db_create_api_key(
-            user_id=g.user["id"],
-            key_hash=api_key_hash,
-            name=name
-        )
-        
-        # Return the API key (only time it will be visible)
-        return jsonify({
-            "message": "API key created successfully",
-            "key_id": key_id,
-            "api_key": api_key,
-            "name": name,
-            "warning": "This API key will only be shown once. Please save it securely."
-        }), 201
-        
-    except Exception as e:
-        logger.error(f"Error creating API key: {str(e)}")
-        return jsonify({
-            "error": "Server error",
-            "message": "Failed to create API key"
-        }), 500
-
-@auth_bp.route("/api-keys", methods=["GET"])
-@auth_required()
-def list_api_keys():
-    """
-    List all API keys for the authenticated user.
-    
-    Returns:
-        200: List of API keys
-        401: Unauthorized
-    """
-    try:
-        # Get API keys from database
-        api_keys = get_user_api_keys(g.user["id"])
-        
-        return jsonify({
-            "api_keys": api_keys
-        }), 200
-        
-    except Exception as e:
-        logger.error(f"Error listing API keys: {str(e)}")
-        return jsonify({
-            "error": "Server error",
-            "message": "Failed to list API keys"
-        }), 500
-
-@auth_bp.route("/api-keys/<key_id>", methods=["DELETE"])
-@auth_required()
-def delete_api_key(key_id):
-    """
-    Revoke an API key.
-    
-    Path Parameters:
-        key_id: ID of the API key to revoke
-        
-    Returns:
-        200: API key revoked successfully
-        401: Unauthorized
-        404: API key not found
-    """
-    try:
-        # Revoke API key
-        revoked = revoke_api_key(key_id, g.user["id"])
-        
-        if not revoked:
-            return jsonify({
-                "error": "API key not found",
-                "message": "API key not found or does not belong to user"
-            }), 404
-        
-        return jsonify({
-            "message": "API key revoked successfully"
-        }), 200
-        
-    except Exception as e:
-        logger.error(f"Error revoking API key: {str(e)}")
-        return jsonify({
-            "error": "Server error",
-            "message": "Failed to revoke API key"
-        }), 500
+    except APIError: # Re-raise APIErrors directly (like reuse detected)
+        raise
+    except ValidationError: # Re-raise ValidationErrors
+        raise
+    except Exception as e: # Catch unexpected errors
+        logger.error("Unexpected error during token refresh", error=str(e), exc_info=True)
+        raise APIError("An unexpected error occurred during token refresh.", status_code=500)
 
 @auth_bp.route("/users", methods=["GET"])
 @admin_required
@@ -367,9 +354,8 @@ def list_users():
         403: Forbidden
     """
     try:
-        # Get users from database
-        from ..db.user_db import get_all_users
-        users = get_all_users()
+        # Call user service
+        users = service_get_all_users()
         
         return jsonify({
             "users": users
@@ -377,10 +363,7 @@ def list_users():
         
     except Exception as e:
         logger.error(f"Error listing users: {str(e)}")
-        return jsonify({
-            "error": "Server error",
-            "message": "Failed to list users"
-        }), 500
+        raise APIError("Server error", status_code=500)
 
 @auth_bp.route("/users/<user_id>/roles", methods=["PUT"])
 @admin_required
@@ -403,37 +386,120 @@ def update_user_roles(user_id):
     """
     data = request.get_json()
     
-    # Validate request data
-    if not data:
-        return jsonify({"error": "Invalid request", "message": "Request body is required"}), 400
-    
+    # Basic validation
+    if not data or "roles" not in data:
+        raise ValidationError('Missing required field: "roles"')
+
     roles = data.get("roles")
     
-    if not roles or not isinstance(roles, list):
-        return jsonify({
-            "error": "Invalid request", 
-            "message": "Roles must be a non-empty list"
-        }), 400
+    if not isinstance(roles, list):
+        # Service layer might add more validation if needed
+        raise ValidationError("Roles must be a non-empty list")
     
     try:
-        # Update user roles
-        from ..db.user_db import update_user_roles as db_update_user_roles
-        updated = db_update_user_roles(user_id, roles)
+        # Call user service
+        updated = service_update_user_roles(user_id, roles)
         
-        if not updated:
+        if updated:
+            logger.info(f"Roles updated for user {user_id}")
             return jsonify({
-                "error": "User not found",
-                "message": "User not found"
-            }), 404
+                "message": "User roles updated successfully",
+                "roles": roles
+            }), 200
         
-        return jsonify({
-            "message": "User roles updated successfully",
-            "roles": roles
-        }), 200
-        
+    except DatabaseError as db_err:
+        # Handle potential DB errors specifically if needed, else rely on generic handler
+        logger.error(f"Database error updating user roles for {user_id}", error=str(db_err), exc_info=True)
+        raise APIError(f"Database error updating roles: {db_err}", status_code=500)
     except Exception as e:
-        logger.error(f"Error updating user roles: {str(e)}")
+        logger.error(f"Unexpected error updating user roles for {user_id}", error=str(e), exc_info=True)
+        raise APIError(f"Server error updating roles: {e}", status_code=500)
+
+@auth_bp.route("/validate", methods=["GET"])
+@require_auth()
+def validate():
+    # If decorator fails, it returns 401/403 directly.
+    # If it succeeds, g.user is populated.
+    user_info = g.user
+    logger.debug("Token validated successfully", user_id=user_info.get('id')) 
+    return jsonify({
+        "id": user_info.get('id'),
+        "username": user_info.get('username'),
+        "roles": user_info.get('roles', [])
+    })
+    # No try/except needed here unless the decorator logic itself can fail unexpectedly
+    # (which would be caught by the global 500 handler)
+
+@auth_bp.route("/keys", methods=["GET"])
+@auth_required
+def get_keys():
+    """Retrieves all active API keys for the authenticated user."""
+    user_id = g.user['id']
+    try:
+        # Call user service
+        api_keys = service_get_keys_for_user(user_id)
+        logger.debug("Retrieved API keys for user", user_id=user_id, count=len(api_keys))
+        # The service returns keys without the hash, suitable for response
+        return jsonify(api_keys)
+    except DatabaseError as e:
+        logger.error("Failed to retrieve API keys due to DB error", user_id=user_id, error=str(e), exc_info=True)
+        raise APIError("Failed to retrieve API keys.", status_code=500)
+    except Exception as e:
+        logger.error("Unexpected error retrieving API keys", user_id=user_id, error=str(e), exc_info=True)
+        raise APIError("An unexpected error occurred while retrieving API keys.", status_code=500)
+
+@auth_bp.route("/keys", methods=["POST"])
+@auth_required
+def create_key():
+    """Creates a new API key for the authenticated user."""
+    user_id = g.user['id']
+    data = request.get_json()
+    key_name = data.get('name') if data else None
+
+    if not key_name:
+        logger.warning("API key creation attempt missing name", user_id=user_id)
+        raise ValidationError("Missing required field: name")
+
+    try:
+        # Call user service to handle key generation, hashing, and storage
+        key_id, generated_key, created_ts = service_add_api_key(user_id, key_name)
+
+        logger.info("API Key created via service", user_id=user_id, key_id=key_id, key_name=key_name)
+        # Return the *plain text key* only once upon creation
         return jsonify({
-            "error": "Server error",
-            "message": "Failed to update user roles"
-        }), 500 
+            "message": "API Key created successfully. Store this key securely, it will not be shown again.",
+            "api_key": generated_key,
+            "key_id": key_id,
+            "key_name": key_name,
+            "created_at_ts": created_ts
+        }), 201
+    except DatabaseError as e:
+        logger.error("Failed to create API key due to DB error", user_id=user_id, key_name=key_name, error=str(e), exc_info=True)
+        raise APIError("Failed to create API key.", status_code=500)
+    except Exception as e:
+        logger.error("Unexpected error creating API key", user_id=user_id, key_name=key_name, error=str(e), exc_info=True)
+        raise APIError("An unexpected error occurred while creating the API key.", status_code=500)
+
+@auth_bp.route("/keys/<key_id>", methods=["DELETE"])
+@auth_required
+def delete_key(key_id):
+    """Revokes (deletes) an API key belonging to the authenticated user."""
+    user_id = g.user['id']
+    try:
+        # Call user service to revoke the key
+        success = service_remove_api_key(user_id, key_id)
+
+        if success:
+            logger.info("API Key revoked", user_id=user_id, key_id=key_id)
+            return '', 204 # No content response for successful deletion
+        else:
+            # If service returns False, it implies key not found for this user
+            logger.warning("API key deletion failed (not found or unauthorized)", user_id=user_id, key_id=key_id)
+            raise APIError("API key not found or you do not have permission to delete it.", status_code=404)
+
+    except DatabaseError as e:
+        logger.error("Failed to delete API key due to DB error", user_id=user_id, key_id=key_id, error=str(e), exc_info=True)
+        raise APIError("Failed to delete API key.", status_code=500)
+    except Exception as e:
+        logger.error("Unexpected error deleting API key", user_id=user_id, key_id=key_id, error=str(e), exc_info=True)
+        raise APIError("An unexpected error occurred while deleting the API key.", status_code=500) 

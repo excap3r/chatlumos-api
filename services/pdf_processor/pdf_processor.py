@@ -15,7 +15,6 @@ import argparse
 from typing import List, Dict, Any, Optional, Tuple
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from dotenv import load_dotenv
 import time
 import datetime
 import pytz
@@ -23,13 +22,10 @@ import sys
 from tqdm import tqdm
 from collections import defaultdict
 import threading
-
-# Try to import PyPDF2
-try:
-    from PyPDF2 import PdfReader
-except ImportError:
-    print("Error: PyPDF2 package not installed. Run 'pip install PyPDF2'")
-    sys.exit(1)
+import io
+import logging
+import PyPDF2
+import structlog
 
 # Try to import tiktoken, but use a fallback if not available
 try:
@@ -39,9 +35,6 @@ except ImportError:
     TIKTOKEN_AVAILABLE = False
     print("Warning: tiktoken not available, using simple character-based token estimation")
 
-# Load environment variables from .env file
-load_dotenv()
-
 # Initialize Flask app
 app = Flask(__name__)
 CORS(app)
@@ -50,13 +43,81 @@ CORS(app)
 api_rate_limits = defaultdict(lambda: {"last_call": 0, "backoff": 0})
 api_lock = threading.Lock()  # Lock for thread-safe API call scheduling
 
+# Configure logger
+logger = structlog.get_logger(__name__)
+
+class PDFProcessor:
+    """Handles PDF text extraction."""
+    
+    def __init__(self):
+        # Initialization, if any needed
+        logger.info("PDFProcessor initialized.")
+        pass
+
+    def extract_text(self, pdf_content: bytes) -> str:
+        """
+        Extracts text content from PDF bytes.
+        
+        Args:
+            pdf_content: Raw bytes of the PDF file.
+            
+        Returns:
+            Extracted text content as a single string.
+            Returns an empty string if extraction fails.
+        """
+        if not pdf_content:
+             logger.warning("Attempted to extract text from empty PDF content.")
+             return ""
+             
+        try:
+            # Create a file-like object from the bytes
+            pdf_file = io.BytesIO(pdf_content)
+            
+            # Create a PDF reader object
+            reader = PyPDF2.PdfReader(pdf_file)
+            
+            # Extract text from each page
+            text_content = []
+            num_pages = len(reader.pages)
+            logger.debug("Starting text extraction", num_pages=num_pages)
+            
+            for page_num in range(num_pages):
+                try:
+                    page = reader.pages[page_num]
+                    page_text = page.extract_text()
+                    if page_text:
+                        text_content.append(page_text)
+                    else:
+                        logger.debug("No text found on page", page_number=page_num + 1)
+                except Exception as page_err:
+                    # Log error for specific page but continue if possible
+                    logger.error("Error extracting text from page", 
+                                 page_number=page_num + 1, 
+                                 error=str(page_err), 
+                                 exc_info=True)
+            
+            full_text = "\n".join(text_content)
+            logger.info("PDF text extraction completed successfully", 
+                        num_pages_processed=num_pages, 
+                        extracted_text_length=len(full_text))
+            return full_text
+            
+        except PyPDF2.errors.PdfReadError as e:
+            # Handle specific PyPDF2 errors (e.g., encrypted, corrupted)
+            logger.error("Failed to read PDF (likely corrupted or encrypted)", error=str(e), exc_info=True)
+            return "" # Return empty string on failure
+        except Exception as e:
+            # Handle other unexpected errors during processing
+            logger.error("Unexpected error during PDF text extraction", error=str(e), exc_info=True)
+            return "" # Return empty string on failure
+
 # 1. Extract text from PDF
 def extract_text_from_pdf(pdf_path: str) -> str:
     """Extract text content from a PDF file."""
     text = ""
     try:
         with open(pdf_path, "rb") as file:
-            pdf_reader = PdfReader(file)
+            pdf_reader = PyPDF2.PdfReader(file)
             for page_num in range(len(pdf_reader.pages)):
                 page = pdf_reader.pages[page_num]
                 text += page.extract_text() + "\n\n"

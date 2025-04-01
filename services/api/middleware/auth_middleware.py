@@ -12,6 +12,7 @@ import json
 from typing import Dict, Any, Optional, Callable, List
 from functools import wraps
 from flask import request, jsonify, g, current_app
+import structlog
 
 # Import utilities
 from .utils.auth_utils import (
@@ -27,8 +28,8 @@ from .utils.auth_utils import (
 # Import API key verification
 from .db.user_db import verify_api_key
 
-# Set up logging
-logger = logging.getLogger("auth_middleware")
+# Configure logger
+logger = structlog.get_logger(__name__)
 
 def get_token_from_header() -> Optional[str]:
     """
@@ -78,127 +79,128 @@ def get_api_key_from_request() -> Optional[str]:
     
     return None
 
-def auth_required(roles: List[str] = None, permissions: List[str] = None):
+def require_auth(roles: Optional[List[str]] = None, allow_api_key: bool = True):
     """
-    Decorator for routes that require authentication.
-    
-    If roles or permissions are specified, the user must have at least one of them.
-    
-    Args:
-        roles: List of required roles
-        permissions: List of required permissions
-        
-    Returns:
-        Decorator function
+    Decorator to enforce authentication and optional role/permission checks.
+    Supports both JWT Bearer tokens and API keys.
     """
     def decorator(f):
         @wraps(f)
-        def wrapped(*args, **kwargs):
-            # Try JWT token first
-            token = get_token_from_header()
-            if token:
-                try:
-                    payload = decode_token(token)
-                    
-                    # Store user info in flask global 'g'
-                    g.user = {
-                        "id": payload.get("sub"),
-                        "roles": payload.get("roles", []),
-                        "permissions": payload.get("permissions", []),
-                        "token_type": payload.get("type")
+        def decorated_function(*args, **kwargs):
+            user = None
+            auth_method = None
+            
+            # 1. Check for JWT Bearer token
+            auth_header = request.headers.get('Authorization')
+            if auth_header and auth_header.startswith('Bearer '):
+                token = auth_header.split(' ')[1]
+                payload = decode_token(token)
+                if payload:
+                    # Standardize user structure for JWT
+                    user = {
+                        'id': payload.get('sub'),
+                        'username': payload.get('username'),
+                        'roles': payload.get('roles', []),
+                        'permissions': payload.get('permissions', []),
+                        'auth_type': 'jwt',
+                        'jti': payload.get('jti')
                     }
-                    
-                    # Check token type
-                    if payload.get("type") != "access":
-                        return jsonify({
-                            "error": "Invalid token type",
-                            "message": "Please use an access token for authentication"
-                        }), 401
-                    
-                    # Check permissions or roles if specified
-                    if permissions:
-                        has_required_perm = any(has_permission(payload, perm) for perm in permissions)
-                        if not has_required_perm:
-                            return jsonify({
-                                "error": "Insufficient permissions",
-                                "message": f"Required permissions: {', '.join(permissions)}"
-                            }), 403
-                    
-                    if roles:
-                        has_required_role = any(has_role(payload, role) for role in roles)
-                        if not has_required_role:
-                            return jsonify({
-                                "error": "Insufficient roles",
-                                "message": f"Required roles: {', '.join(roles)}"
-                            }), 403
-                    
-                    return f(*args, **kwargs)
-                    
-                except ExpiredTokenError:
-                    return jsonify({
-                        "error": "Token expired",
-                        "message": "Your token has expired, please login again"
-                    }), 401
-                except (InvalidTokenError, MissingSecretError):
-                    pass  # Try API key instead
+                    auth_method = 'jwt' # Keep tracking auth method separately if needed
+                    logger.debug("Authenticated via JWT", user_id=user['id'])
+                else:
+                     logger.warning("Invalid or expired JWT token received")
+                     return jsonify({"error": "Invalid or expired token"}), 401
             
-            # Try API key
-            api_key = get_api_key_from_request()
-            if api_key:
-                try:
-                    # Verify API key
-                    api_key_data = verify_api_key(api_key)
-                    
-                    # Store user info in flask global 'g'
-                    g.user = {
-                        "id": api_key_data.get("user_id"),
-                        "username": api_key_data.get("username"),
-                        "roles": api_key_data.get("roles", []),
-                        "permissions": api_key_data.get("permissions", []),
-                        "auth_type": "api_key",
-                        "api_key_id": api_key_data.get("id")
-                    }
-                    
-                    # Check permissions
-                    if permissions:
-                        has_required_perm = any(perm in api_key_data.get("permissions", []) for perm in permissions)
-                        if not has_required_perm:
-                            return jsonify({
-                                "error": "Insufficient permissions",
-                                "message": f"Required permissions: {', '.join(permissions)}"
-                            }), 403
-                    
-                    # Check roles
-                    if roles:
-                        has_required_role = any(role in api_key_data.get("roles", []) for role in roles)
-                        if not has_required_role:
-                            return jsonify({
-                                "error": "Insufficient roles",
-                                "message": f"Required roles: {', '.join(roles)}"
-                            }), 403
-                    
-                    return f(*args, **kwargs)
-                    
-                except Exception as e:
-                    logger.error(f"API key authentication error: {str(e)}")
+            # 2. Check for API Key (if JWT not found/valid and allow_api_key is True)
+            elif allow_api_key:
+                api_key = request.headers.get('X-API-Key') or request.args.get('api_key')
+                if api_key:
+                    try:
+                        # Validate key against DB (verify_api_key checks hash)
+                        user_info = verify_api_key(api_key)
+                        if user_info:
+                            # Standardize user structure for API Key
+                            # Assuming verify_api_key returns user_id, username, roles, permissions, id (key id)
+                            user = {
+                                'id': user_info.get('user_id'), # Map user_id from DB to id
+                                'username': user_info.get('username'),
+                                'roles': user_info.get('roles', []),
+                                'permissions': user_info.get('permissions', []),
+                                'auth_type': 'api_key',
+                                'api_key_id': user_info.get('id') # Map key id from DB
+                            }
+                            auth_method = 'api_key'
+                            logger.debug("Authenticated via API Key", user_id=user['id'], key_id=user['api_key_id'])
+                        else:
+                             logger.warning("Invalid API key provided", key_preview=api_key[:4]+"...")
+                             return jsonify({"error": "Invalid API key"}), 401
+                    except DatabaseError as db_err:
+                        logger.error("Database error during API key validation", error=str(db_err), exc_info=True)
+                        return jsonify({"error": "API key validation failed due to database issue"}), 500
+                    except Exception as e:
+                        logger.error("Unexpected error during API key validation", error=str(e), exc_info=True)
+                        return jsonify({"error": "An unexpected error occurred during API key validation"}), 500
+
+            # 3. No valid authentication found
+            if not user:
+                logger.warning("Authentication required but none provided or invalid")
+                return jsonify({"error": "Authentication required"}), 401
+
+            # 4. Role check (if roles are specified)
+            if roles:
+                user_roles = user.get('roles', [])
+                if not any(has_role(user, role) for role in roles):
+                    logger.warning("Authorization failed: Insufficient roles", 
+                                 user_id=user['id'], 
+                                 required_roles=roles, 
+                                 user_roles=user_roles)
+                    return jsonify({"error": "Forbidden: Insufficient roles"}), 403
+
+            # Authentication successful, store user info in g for access in the route
+            g.user = user
+            g.auth_method = auth_method
             
-            # No valid authentication found
-            return jsonify({
-                "error": "Authentication required",
-                "message": "Please provide a valid access token or API key"
-            }), 401
-            
-        return wrapped
+            return f(*args, **kwargs)
+        return decorated_function
     return decorator
 
-def admin_required(f):
+# Convenience decorators
+def admin_required():
+    """Decorator requiring 'admin' role."""
+    return require_auth(roles=['admin'])
+
+def permission_required(permission: str):
     """
-    Decorator for routes that require admin role.
-    
-    Returns:
-        Decorator function
+    Decorator factory requiring a specific permission.
+    Ensures the user is authenticated and has the required permission.
+
+    Args:
+        permission: The permission string required to access the route.
     """
-    return auth_required(roles=["admin"])(f)
+    def decorator(f):
+        # Apply require_auth first to ensure g.user exists and is valid
+        @require_auth() # No specific roles needed here, just authentication
+        @wraps(f) # Apply wraps to the inner function
+        def decorated_function(*args, **kwargs):
+            # g.user should be set by @require_auth
+            if not hasattr(g, 'user') or not g.user:
+                # This shouldn't happen if @require_auth runs first, but safeguard
+                logger.error("Permission check failed: User not found in g after @require_auth")
+                return jsonify({"error": "Authentication context error"}), 500
+
+            # Check permission using the utility function
+            if not has_permission(g.user, permission):
+                logger.warning("Authorization failed: Missing required permission",
+                             user_id=g.user.get('id'),
+                             required_permission=permission,
+                             user_permissions=g.user.get('permissions', []),
+                             user_roles=g.user.get('roles', []))
+                return jsonify({"error": f"Forbidden: Requires permission '{permission}'"}), 403
+
+            # Permission check passed
+            return f(*args, **kwargs)
+        return decorated_function
+    return decorator
 
 def optional_auth(f):
     """
@@ -213,47 +215,51 @@ def optional_auth(f):
     @wraps(f)
     def wrapped(*args, **kwargs):
         # Try JWT token first
+        g.user = None # Initialize g.user
         token = get_token_from_header()
         if token:
             try:
                 payload = decode_token(token)
-                
-                # Store user info in flask global 'g'
+                # Standardize g.user for optional JWT auth
                 g.user = {
-                    "id": payload.get("sub"),
-                    "roles": payload.get("roles", []),
-                    "permissions": payload.get("permissions", []),
-                    "token_type": payload.get("type"),
-                    "auth_type": "jwt"
+                    'id': payload.get('sub'),
+                    'username': payload.get('username'),
+                    'roles': payload.get('roles', []),
+                    'permissions': payload.get('permissions', []),
+                    'auth_type': 'jwt',
+                    'jti': payload.get('jti')
                 }
             except Exception as e:
                 # Just log the error but continue
                 logger.warning(f"Optional JWT auth failed: {str(e)}")
-                g.user = None
+                # g.user remains None if auth fails
         else:
             # Try API key
             api_key = get_api_key_from_request()
             if api_key:
                 try:
                     # Verify API key
-                    api_key_data = verify_api_key(api_key)
-                    
-                    # Store user info in flask global 'g'
-                    g.user = {
-                        "id": api_key_data.get("user_id"),
-                        "username": api_key_data.get("username"),
-                        "roles": api_key_data.get("roles", []),
-                        "permissions": api_key_data.get("permissions", []),
-                        "auth_type": "api_key",
-                        "api_key_id": api_key_data.get("id")
-                    }
+                    user_info = verify_api_key(api_key)
+                    if user_info:
+                        # Standardize g.user for optional API key auth
+                        g.user = {
+                            'id': user_info.get('user_id'),
+                            'username': user_info.get('username'),
+                            'roles': user_info.get('roles', []),
+                            'permissions': user_info.get('permissions', []),
+                            'auth_type': 'api_key',
+                            'api_key_id': user_info.get('id')
+                        }
+                    else:
+                        # Log invalid key but continue
+                        logger.warning("Optional API key auth failed: Invalid key")
+                        # g.user remains None
                 except Exception as e:
                     # Just log the error but continue
                     logger.warning(f"Optional API key auth failed: {str(e)}")
-                    g.user = None
-            else:
-                g.user = None
-        
+                    # g.user remains None
+        # If no auth provided or auth failed, g.user is None
+
         return f(*args, **kwargs)
     
     return wrapped 

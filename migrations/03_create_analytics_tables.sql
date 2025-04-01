@@ -17,13 +17,14 @@ CREATE TABLE IF NOT EXISTS analytics_events (
     INDEX idx_event_type (event_type),
     INDEX idx_user_id (user_id),
     INDEX idx_timestamp (timestamp),
-    INDEX idx_endpoint (endpoint)
+    INDEX idx_endpoint (endpoint),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Webhook Subscriptions Table
 CREATE TABLE IF NOT EXISTS webhook_subscriptions (
     id VARCHAR(36) PRIMARY KEY,
-    url VARCHAR(255) NOT NULL,
+    url VARCHAR(2048) NOT NULL,
     owner_id VARCHAR(36) NOT NULL,
     secret VARCHAR(255),
     description TEXT,
@@ -32,7 +33,8 @@ CREATE TABLE IF NOT EXISTS webhook_subscriptions (
     last_triggered DATETIME,
     success_count INT NOT NULL DEFAULT 0,
     failure_count INT NOT NULL DEFAULT 0,
-    INDEX idx_owner_id (owner_id)
+    INDEX idx_owner_id (owner_id),
+    FOREIGN KEY (owner_id) REFERENCES users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Webhook Event Types Table (Many-to-Many)

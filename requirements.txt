@@ -1,27 +1,60 @@
-PyPDF2>=3.0.0
-mysql-connector-python>=8.0.0
-python-dotenv>=0.20.0
-requests>=2.27.1
-tqdm>=4.64.0
-numpy>=1.23.0
-# Optional but recommended for token counting
-tiktoken>=0.4.0
-# For vector database
-pinecone>=6.0.2
-torch>=1.13.0
-sentence-transformers>=2.2.2
-# For translation and language detection
-deep-translator>=1.10.1
-# API server
-Flask>=2.0.1
-Flask-CORS>=3.0.10
-gunicorn>=20.1.0
-# Caching and optimization
-redis>=4.5.5
-# Logging and monitoring
-structlog>=23.1.0
-# Production-ready WSGI server
-gevent>=22.10.2
-# Visualization
-plotly>=5.10.0
-pandas>=1.5.0 
+# Run `pip-audit` to check for known vulnerabilities
+
+# Core Application & Extraction
+PyPDF2==3.0.0
+# mysql-connector-python==8.0.0 # Replaced by PyMySQL for SQLAlchemy compatibility
+PyMySQL==1.1.1 # SQLAlchemy driver
+SQLAlchemy==2.0.31 # ORM
+Alembic==1.13.2 # Migrations
+python-dotenv==0.20.0
+requests==2.27.1
+tqdm==4.64.0
+numpy==1.26.4
+
+# LLM & Tokenization
+tiktoken==0.4.0 # Optional but recommended for token counting
+
+# Vector Database
+pinecone==6.0.2
+torch==2.6.0 # Note: Consider CPU/GPU specific versions if needed
+sentence-transformers==2.2.2
+
+# Translation & Language
+deep-translator==1.10.1
+
+# API Server & Framework
+Flask==2.0.1
+Flask-CORS==3.0.10
+gunicorn==20.1.0
+gevent==24.2.1 # For Gunicorn worker type
+
+# Input Validation
+pydantic==2.10.1 # Added for robust input validation
+
+# Caching
+redis==4.6.0
+
+# Logging
+structlog==23.1.0
+
+# Visualization (If used)
+plotly==5.10.0
+pandas==2.2.2
+
+# Testing Framework
+pytest==7.0.0
+pytest-mock==3.10.0
+pytest-cov==4.0.0
+pytest-asyncio==0.20.0
+pytest-flask==1.2.0
+
+# Test Utilities
+fakeredis[json]==2.24.0 # Use [json] extra for JSON command support
+
+# Background Task Processing
+celery[redis]==5.3.6 # Pinned version 
+
+# Documentation Generation
+mkdocs
+mkdocstrings
+mkdocstrings-python 

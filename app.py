@@ -8,14 +8,18 @@ with API Gateway. Optimized for high load and Next.js frontend integration.
 """
 
 import os
-import logging
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request, g
 from flask_cors import CORS
-from dotenv import load_dotenv
 import redis
+import structlog
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker, scoped_session
 
-# Import API Gateway interface
-from services.api_gateway import APIGateway
+# Import configuration first
+from services.config import AppConfig
+
+# Import logging utilities
+from services.utils.log_utils import initialize_logging, setup_request_logging
 
 # Import authentication blueprint
 from services.api.auth_routes import auth_bp
@@ -36,82 +40,246 @@ from services.api.routes.question import question_bp
 from services.api.routes.docs import docs_bp
 from services.api.routes.root import root_bp
 
-# Load environment variables
-load_dotenv()
+# Import error handling utilities
+from services.utils.error_utils import APIError, format_error_response
+from werkzeug.exceptions import NotFound
 
-# Initialize Flask app
-app = Flask(__name__)
+# Import Service Classes for Initialization
+from services.db.user_db import UserDB
+from services.llm_service.llm_service import LLMService
+from services.vector_search.vector_search import VectorSearchService
+from services.analytics.analytics_service import AnalyticsService
+from services.analytics.webhooks.webhook_service import WebhookService
 
-# API version
-API_VERSION = "v1"
-app.config['API_VERSION'] = API_VERSION # Store in app config
-app.config['DEFAULT_TOP_K'] = 10 # Added DEFAULT_TOP_K to config
-app.config['DEFAULT_INDEX'] = "wisdom-embeddings" # Added DEFAULT_INDEX
+# Initialize logger early for potential issues during import or setup
+logger = structlog.get_logger(__name__)
 
-# Configure CORS for Next.js frontend
-CORS(app, resources={
-    r"/api/*": {
-        "origins": os.getenv("FRONTEND_URL", "http://localhost:3000"),
-        "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-        "allow_headers": ["Content-Type", "Authorization"]
-    }
-})
+def create_app(config_object=AppConfig):
+    """Factory function to create and configure the Flask application."""
+    app = Flask(__name__)
 
-# Register existing blueprints
-app.register_blueprint(auth_bp, url_prefix=f'/api/{API_VERSION}/auth')
-app.register_blueprint(analytics_bp, url_prefix=f'/api/{API_VERSION}/analytics')
-app.register_blueprint(webhook_bp, url_prefix=f'/api/{API_VERSION}/webhooks')
+    # --- Load Configuration from Config Object --- #
+    app.config.from_object(config_object)
+    logger.info("Flask application configuration loaded.", config_env=os.getenv('FLASK_ENV', 'default'))
 
-# Register new blueprints
-app.register_blueprint(health_bp, url_prefix=f'/api/{API_VERSION}')
-app.register_blueprint(ask_bp, url_prefix=f'/api/{API_VERSION}')
-app.register_blueprint(progress_bp, url_prefix=f'/api/{API_VERSION}')
-app.register_blueprint(translate_bp, url_prefix=f'/api/{API_VERSION}')
-app.register_blueprint(search_bp, url_prefix=f'/api/{API_VERSION}')
-app.register_blueprint(pdf_bp, url_prefix=f'/api/{API_VERSION}')
-app.register_blueprint(question_bp, url_prefix=f'/api/{API_VERSION}')
-app.register_blueprint(docs_bp, url_prefix=f'/api/{API_VERSION}')
-app.register_blueprint(root_bp)
+    # --- Initialize Structured Logging --- #
+    initialize_logging(log_level_name=app.config.get('LOG_LEVEL', 'INFO')) 
+    setup_request_logging(app) # Set up before/after request hooks
+    logger.info("Structured logging initialized.")
 
-# Global variables
+    # --- CORS Configuration --- #
+    CORS(app, resources={
+        r"/api/*": {
+            "origins": app.config.get('FRONTEND_URL', '*'), # Use get with default
+            "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+            "allow_headers": ["Content-Type", "Authorization"],
+            "supports_credentials": True
+        }
+    })
+    logger.info("CORS configured.", allowed_origins=app.config.get('FRONTEND_URL', '*'))
 
-# Progress event storage - maps session IDs to event queues
-app.progress_events = {}
+    # --- SQLAlchemy Setup --- #
+    db_driver = app.config.get('DB_DRIVER', 'mysql+pymysql')
+    db_user = app.config.get('DB_USER')
+    db_password = app.config.get('DB_PASSWORD')
+    db_host = app.config.get('DB_HOST', 'localhost')
+    db_port = app.config.get('DB_PORT', '3306')
+    db_name = app.config.get('DB_NAME')
 
-# Initialize API Gateway client and attach to app
-app.api_gateway = APIGateway(os.getenv("GATEWAY_URL"))
+    if not all([db_user, db_password, db_name]):
+        logger.error("Database credentials (DB_USER, DB_PASSWORD, DB_NAME) not fully configured. SQLAlchemy engine not created.")
+        app.db_engine = None
+        app.db_session_factory = None
+        # Optionally make db_session a stub that raises an error if used
+        app.db_session = None # No session available
+    else:
+        try:
+            database_uri = f"{db_driver}://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
+            app.db_engine = create_engine(database_uri, pool_pre_ping=True) # Add pool_pre_ping
+            # Create a configured "Session" class
+            Session = sessionmaker(autocommit=False, autoflush=False, bind=app.db_engine)
+            # Create a thread-local session factory
+            app.db_session_factory = scoped_session(Session)
+            # Make the session property accessible directly for convenience in request handlers if needed
+            # Usage: db_session() to get the current session
+            app.db_session = app.db_session_factory
 
-# Initialize Redis for caching if available and attach to app
-redis_url = os.getenv("REDIS_URL")
-app.redis_client = None
-if redis_url:
+            logger.info("SQLAlchemy engine and session factory created successfully.", db_host=db_host, db_name=db_name)
+
+            # Add teardown context to remove session after request/context ends
+            @app.teardown_appcontext
+            def shutdown_session(exception=None):
+                if hasattr(app, 'db_session_factory') and app.db_session_factory:
+                    app.db_session_factory.remove()
+                    # logger.debug("SQLAlchemy session removed for context.") # Optional debug logging
+
+        except Exception as e:
+            logger.error("Error creating SQLAlchemy engine or session factory.",
+                         db_host=db_host, db_name=db_name, error=str(e), exc_info=True)
+            app.db_engine = None
+            app.db_session_factory = None
+            app.db_session = None
+
+    # --- End SQLAlchemy Setup --- #
+
+    # --- Register Blueprints --- #
+    api_version = app.config.get('API_VERSION', 'v1')
+    api_prefix = f"/api/{api_version}"
+
+    app.register_blueprint(auth_bp, url_prefix=f'{api_prefix}/auth')
+    app.register_blueprint(analytics_bp, url_prefix=f'{api_prefix}/analytics')
+    app.register_blueprint(webhook_bp, url_prefix=f'{api_prefix}/webhooks')
+    app.register_blueprint(health_bp, url_prefix=api_prefix)
+    app.register_blueprint(ask_bp, url_prefix=api_prefix)
+    app.register_blueprint(progress_bp, url_prefix=api_prefix)
+    app.register_blueprint(translate_bp, url_prefix=api_prefix)
+    app.register_blueprint(search_bp, url_prefix=api_prefix)
+    app.register_blueprint(pdf_bp, url_prefix=api_prefix)
+    app.register_blueprint(question_bp, url_prefix=api_prefix)
+    app.register_blueprint(docs_bp, url_prefix=api_prefix)
+    app.register_blueprint(root_bp) # Root blueprint has no prefix
+    logger.info("API blueprints registered.", api_prefix=api_prefix)
+
+
+    # --- Service Initialization --- #
+    
+    # Initialize Redis client
+    redis_url = app.config.get('REDIS_URL')
+    app.redis_client = None
+    if redis_url:
+        try:
+            app.redis_client = redis.from_url(redis_url, decode_responses=True)
+            app.redis_client.ping() # Test connection
+            logger.info("Redis client connected successfully.", redis_url=redis_url)
+        except redis.exceptions.ConnectionError as e:
+            logger.error("Failed to connect to Redis. Proceeding without Redis.", redis_url=redis_url, error=str(e))
+        except Exception as e:
+            logger.error("Unexpected error initializing Redis.", redis_url=redis_url, error=str(e))
+    else:
+        logger.warning("REDIS_URL not configured. Redis client not initialized.")
+
+    # Initialize User Database Pool (Note: This might be replaced by SQLAlchemy session later)
     try:
-        app.redis_client = redis.from_url(redis_url)
-        logging.info(f"Connected to Redis at {redis_url}")
+        app.user_db_pool = UserDB.create_pool(app.config)
+        if app.user_db_pool:
+            logger.info("UserDB MySQL connection pool created successfully. (Will be replaced by ORM)")
+        else:
+            logger.error("Failed to create UserDB MySQL connection pool.")
     except Exception as e:
-        logging.error(f"Failed to connect to Redis: {e}")
+        logger.error("Error creating UserDB MySQL connection pool", error=str(e), exc_info=True)
+        app.user_db_pool = None # Ensure it's None if init fails
 
-# Set up analytics tracking
-setup_analytics_tracking(app)
+    # Initialize LLM Service
+    try:
+        app.llm_service = LLMService(config=app.config)
+        logger.info("LLM Service initialized successfully.")
+    except Exception as e:
+        logger.error("Error initializing LLM Service", error=str(e), exc_info=True)
+        app.llm_service = None
+
+    # Initialize Vector Search Service
+    try:
+        app.vector_search_service = VectorSearchService(config=app.config)
+        logger.info("Vector Search Service initialized successfully.")
+        # Optional: Add a connection test/ping here if the service provides one
+        # app.vector_search_service.test_connection() 
+    except Exception as e:
+        logger.error("Error initializing Vector Search Service", error=str(e), exc_info=True)
+        app.vector_search_service = None
+
+    # Initialize Analytics Service
+    try:
+        # Pass necessary initialized components if needed
+        app.analytics_service = AnalyticsService(config=app.config) 
+        logger.info("Analytics Service initialized successfully.")
+    except Exception as e:
+        logger.error("Error initializing Analytics Service", error=str(e), exc_info=True)
+        app.analytics_service = None
+
+    # Initialize Webhook Service
+    try:
+        app.webhook_service = WebhookService(config=app.config) 
+        logger.info("Webhook Service initialized successfully.")
+    except Exception as e:
+        logger.error("Error initializing Webhook Service", error=str(e), exc_info=True)
+        app.webhook_service = None
+
+    # Set up analytics tracking middleware (after services are initialized)
+    setup_analytics_tracking(app)
+    logger.info("Analytics tracking middleware setup.")
+
+
+    # --- Centralized Error Handling --- #
+    error_logger = structlog.get_logger("error_handler")
+
+    @app.errorhandler(APIError)
+    def handle_api_error(error: APIError):
+        """Handle custom APIErrors and return standardized JSON response."""""
+        error_logger.warning("API Error occurred", 
+                             error_message=error.message, 
+                             status_code=error.status_code, 
+                             details=error.details, 
+                             exception_type=type(error).__name__,
+                             path=request.path,
+                             method=request.method)
+        response_dict, status_code = format_error_response(error)
+        return jsonify(response_dict), status_code
+
+    @app.errorhandler(NotFound) # Handle 404 Not Found
+    def handle_not_found(error: NotFound):
+        """Handle Flask's default 404 and return JSON."""""
+        error_logger.info("Resource not found (404)", path=request.path, method=request.method)
+        response_dict = {
+            "error": "Not Found",
+            "message": "The requested URL was not found on the server."
+        }
+        return jsonify(response_dict), 404
+
+    @app.errorhandler(Exception) # Catch-all for other exceptions (500)
+    def handle_generic_exception(error: Exception):
+        """Handle unexpected exceptions and return a generic 500 error."""""
+        error_logger.error("Unhandled exception occurred", 
+                           error=str(error),
+                           exception_type=type(error).__name__,
+                           path=request.path,
+                           method=request.method,
+                           exc_info=True) 
+                           
+        response_dict = {
+            "error": "Internal Server Error",
+            "message": "An unexpected error occurred on the server."
+        }
+        # Optionally hide details in production
+        # if not app.config['DEBUG']:
+        #     response_dict['message'] = "An unexpected error occurred."
+        return jsonify(response_dict), 500
+        
+    logger.info("Centralized error handlers registered.")
+
+    return app
+
+# --- End Error Handling ---
+
+# Create the Flask app instance using the factory
+app = create_app()
 
 if __name__ == "__main__":
-    # Configure logging basic setup if running directly
-    logging.basicConfig(level=logging.INFO)
-    # Parse command line arguments
-    import argparse
-    parser = argparse.ArgumentParser(description='Run the Wisdom API Server')
-    parser.add_argument('--host', default='0.0.0.0', help='Host to run the server on')
-    parser.add_argument('--port', type=int, default=5000, help='Port to run the server on')
-    parser.add_argument('--debug', action='store_true', help='Run in debug mode')
-    parser.add_argument('--workers', type=int, default=4, help='Number of worker processes (only used with gunicorn)')
-    args = parser.parse_args()
-    
-    # Check if running with gunicorn
-    if "gunicorn" in os.environ.get("SERVER_SOFTWARE", ""):
-        # Gunicorn will handle the server setup
-        logging.info(f"Running with gunicorn with {os.environ.get('WEB_CONCURRENCY', '?')} workers")
+    # Use config values for host, port, debug obtained from the app config
+    host = app.config.get('HOST', '0.0.0.0') 
+    port = app.config.get('PORT', 5000)
+    debug_mode = app.config.get('DEBUG', False)
+
+    # Check if running with gunicorn (Gunicorn sets SERVER_SOFTWARE)
+    is_gunicorn = "gunicorn" in os.environ.get("SERVER_SOFTWARE", "")
+
+    if is_gunicorn:
+        # Gunicorn manages the server process
+        # Logging is typically handled by Gunicorn config (gunicorn_config.py)
+        logger.info(f"Running with gunicorn workers.")
     else:
-        # Run with Flask's built-in server (not recommended for production)
-        logging.info(f"Starting server on {args.host}:{args.port} (debug={args.debug})")
-        logging.warning("Using Flask's built-in server. For production, use gunicorn.")
-        app.run(host=args.host, port=args.port, debug=args.debug) 
+        # Run with Flask's built-in server (for development/debugging)
+        logger.info(f"Starting Flask development server", host=host, port=port, debug=debug_mode)
+        if not debug_mode:
+             logger.warning("Running Flask development server in non-debug mode. Use Gunicorn for production.")
+        # Pass debug=debug_mode to app.run
+        app.run(host=host, port=port, debug=debug_mode)

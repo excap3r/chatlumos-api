@@ -156,88 +156,11 @@ def api_docs():
                     }
                 }
             },
-            f"/api/{API_VERSION}/process_pdf": {
-                "post": {
-                    "summary": "Upload and process a PDF document",
-                    "description": "Upload a PDF document, extract knowledge, and store it in the database",
-                    "security": [
-                        {"bearerAuth": []},
-                        {"apiKeyAuth": []}
-                    ],
-                    "requestBody": {
-                        "content": {
-                            "multipart/form-data": {
-                                "schema": {
-                                    "type": "object",
-                                    "properties": {
-                                        "file": {
-                                            "type": "string",
-                                            "format": "binary",
-                                            "description": "PDF file to upload"
-                                        },
-                                        "author_name": {
-                                            "type": "string",
-                                            "description": "Name of the document author"
-                                        },
-                                        "title": {
-                                            "type": "string",
-                                            "description": "Optional document title (defaults to filename)"
-                                        },
-                                        "language": {
-                                            "type": "string",
-                                            "description": "Optional document language (defaults to 'en')"
-                                        },
-                                        "translate_to_english": {
-                                            "type": "boolean",
-                                            "description": "Whether to translate content to English (defaults to true)"
-                                        }
-                                    },
-                                    "required": ["file", "author_name"]
-                                }
-                            }
-                        }
-                    },
-                    "responses": {
-                        "202": {
-                            "description": "PDF processing started"
-                        },
-                        "400": {
-                            "description": "Invalid request or file type"
-                        },
-                         "401": {
-                             "description": "Unauthorized"
-                         },
-                        "500": {
-                            "description": "Server error during processing"
-                        }
-                    }
-                }
+            f"/api/{API_VERSION}/auth/keys/{{key_id}}": {
+                "delete": AuthPaths.delete_key
             },
-             f"/api/{API_VERSION}/progress-stream/{{session_id}}": {
-                "get": {
-                    "summary": "Stream progress updates",
-                    "description": "Streams progress updates for a specific session ID (e.g., PDF processing).",
-                    "parameters": [
-                        {
-                            "name": "session_id",
-                            "in": "path",
-                            "required": True,
-                            "description": "The session ID obtained when starting a process.",
-                            "schema": {"type": "string"}
-                        }
-                    ],
-                    "responses": {
-                        "200": {
-                            "description": "Stream of progress events",
-                            "content": {
-                                "text/event-stream": {
-                                    "schema": {"type": "string"}
-                                }
-                            }
-                        },
-                        "404": {"description": "Session ID not found"}
-                    }
-                }
+            f"/api/{API_VERSION}/progress-stream/{{session_id}}": {
+                "get": PdfPaths.progress_stream
             },
             # Add other endpoints here (e.g., search, auth, analytics, webhooks)
         }

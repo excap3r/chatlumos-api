@@ -6,22 +6,33 @@ Provides API endpoints for analytics data and reporting.
 """
 
 import logging
-from datetime import datetime
-from flask import Blueprint, request, jsonify
+import structlog
+from datetime import datetime, timedelta
+from flask import Blueprint, request, jsonify, g, current_app, Response, make_response
 from typing import Dict, Any, List, Optional
+import csv
+from io import StringIO
+import redis
 
 # Import analytics services
 from ..analytics.analytics_service import (
     get_analytics,
     get_analytics_summary,
-    AnalyticsEvent
+    AnalyticsEvent,
+    AnalyticsService
 )
 
 # Import authentication utilities
 from ..auth_middleware import auth_required, admin_required
 
-# Set up logging
-logger = logging.getLogger("analytics_routes")
+# Import request helpers
+from .utils.request_helpers import parse_date_range_args, generate_csv_string
+
+# Import specific exceptions for error handling
+from services.utils.error_utils import ValidationError
+
+# Configure logger
+logger = structlog.get_logger(__name__)
 
 # Create Blueprint
 analytics_bp = Blueprint("analytics", __name__)
@@ -30,29 +41,22 @@ analytics_bp = Blueprint("analytics", __name__)
 @auth_required()
 def dashboard():
     """
-    Get analytics dashboard data.
-    
+    Get analytics dashboard summary data.
+    Supports filtering by date range using ISO 8601 format query parameters.
+
     Query Parameters:
-        start_date: Optional start date (ISO format)
-        end_date: Optional end date (ISO format)
-        
+        start_date: Optional start date (ISO 8601 format, e.g., YYYY-MM-DDTHH:MM:SS or YYYY-MM-DD)
+        end_date: Optional end date (ISO 8601 format)
+
     Returns:
         200: Analytics summary
+        400: Invalid date format or range
         500: Server error
     """
     try:
-        # Parse date parameters
-        start_date_str = request.args.get("start_date")
-        end_date_str = request.args.get("end_date")
-        
-        start_date = None
-        if start_date_str:
-            start_date = datetime.fromisoformat(start_date_str)
-            
-        end_date = None
-        if end_date_str:
-            end_date = datetime.fromisoformat(end_date_str)
-        
+        # Parse date parameters using helper
+        start_date, end_date = parse_date_range_args(request.args)
+
         # Get analytics summary
         summary = get_analytics_summary(
             start_date=start_date,
@@ -60,11 +64,15 @@ def dashboard():
         )
         
         return jsonify(summary)
+    except ValidationError as e:
+        logger.warning("Invalid date format/range in dashboard request", args=request.args, error=str(e))
+        # Raised by parse_date_range_args for invalid format/range
+        return jsonify({"error": "Invalid query parameters", "message": str(e)}), 400
     except Exception as e:
-        logger.error(f"Error retrieving analytics dashboard: {e}")
+        logger.error("Error retrieving analytics dashboard", error=str(e), exc_info=True)
         return jsonify({
             "error": "Failed to retrieve analytics dashboard",
-            "message": str(e)
+            "message": "An internal error occurred."
         }), 500
 
 @analytics_bp.route("/events", methods=["GET"])
@@ -78,11 +86,13 @@ def events():
         user_id: Optional user ID filter
         start_date: Optional start date (ISO format)
         end_date: Optional end date (ISO format)
-        limit: Maximum number of events to return (default: 100)
-        
+        page: Page number to retrieve (default: 1)
+        page_size: Number of events per page (default: from config or 100)
+
     Returns:
-        200: Events list
+        200: Paginated events list with metadata
         403: Insufficient permissions
+        400: Invalid query parameter format or value
         500: Server error
     """
     try:
@@ -90,45 +100,65 @@ def events():
         event_type = request.args.get("event_type")
         user_id = request.args.get("user_id")
         
-        start_date_str = request.args.get("start_date")
-        end_date_str = request.args.get("end_date")
+        # Parse date params using helper (raises ValidationError)
+        start_date, end_date = parse_date_range_args(request.args)
         
-        start_date = None
-        if start_date_str:
-            start_date = datetime.fromisoformat(start_date_str)
-            
-        end_date = None
-        if end_date_str:
-            end_date = datetime.fromisoformat(end_date_str)
-            
-        limit = int(request.args.get("limit", 100))
+        # Parse pagination parameters, catching potential ValueError
+        default_page_size = current_app.config.get('ANALYTICS_DEFAULT_LIMIT', 100)
+        try:
+            page_arg = request.args.get("page", "1")
+            size_arg = request.args.get("page_size", str(default_page_size))
+            page = int(page_arg)
+            page_size = int(size_arg)
+            if page < 1:
+                page = 1 # Ensure page is at least 1
+            if page_size < 1 or page_size > 1000: # Add a max page size check
+                page_size = default_page_size # Ensure page_size is positive and reasonable
+        except ValueError:
+            logger.warning("Invalid non-integer pagination parameter provided", page_arg=page_arg, size_arg=size_arg)
+            # Raise ValidationError to be caught by the handler below
+            raise ValidationError(f"Invalid pagination parameters: 'page' ('{page_arg}') and 'page_size' ('{size_arg}') must be integers.")
+        
+        logger.debug("Retrieving analytics events via API (paginated)",
+                     page=page, page_size=page_size, event_type=event_type, user_id=user_id,
+                     start_date=start_date, end_date=end_date) # Fixed parenthesis
         
         # Get events
-        events = get_analytics(
+        # Get analytics service instance and call function
+        analytics_service = get_analytics_service()
+        paginated_result = analytics_service.get_analytics(
             event_type=event_type,
             user_id=user_id,
             start_date=start_date,
             end_date=end_date,
-            limit=limit
+            page=page,
+            page_size=page_size
         )
-        
-        return jsonify({
-            "events": events,
-            "count": len(events),
-            "limit": limit
-        })
+
+        # Return the paginated result structure directly
+        return jsonify(paginated_result)
+
+    except ValidationError as e: # Catch validation errors from date parsing or pagination parsing
+        logger.warning("Invalid query parameter format for analytics", args=request.args, error=str(e))
+        return jsonify({"error": "Invalid query parameter format or value.", "details": str(e)}), 400
     except Exception as e:
-        logger.error(f"Error retrieving analytics events: {e}")
-        return jsonify({
-            "error": "Failed to retrieve events",
-            "message": str(e)
-        }), 500
+        logger.error("Error retrieving analytics events via API", error=str(e), exc_info=True)
+        return jsonify({"error": "Internal server error retrieving analytics"}), 500
+
+# Use the service instance from the app context
+# Assuming it's stored like current_app.analytics_service
+def get_analytics_service() -> AnalyticsService:
+    if not hasattr(current_app, 'analytics_service'):
+        logger.error("AnalyticsService not initialized or attached to current_app")
+        # This indicates a setup problem, raise a configuration error or similar
+        raise RuntimeError("AnalyticsService is not available.")
+    return current_app.analytics_service
 
 @analytics_bp.route("/user-stats", methods=["GET"])
-@auth_required()
+@auth_required() # Ensures g.user is set
 def user_stats():
     """
-    Get analytics for the current user.
+    Get analytics summary statistics for the currently authenticated user.
     
     Query Parameters:
         start_date: Optional start date (ISO format)
@@ -141,58 +171,33 @@ def user_stats():
     """
     try:
         # Get current user ID from authentication
-        from flask import g
         user_id = g.user["id"]
         
         # Parse date parameters
-        start_date_str = request.args.get("start_date")
-        end_date_str = request.args.get("end_date")
+        start_date, end_date = parse_date_range_args(request.args)
         
-        start_date = None
-        if start_date_str:
-            start_date = datetime.fromisoformat(start_date_str)
-            
-        end_date = None
-        if end_date_str:
-            end_date = datetime.fromisoformat(end_date_str)
-        
-        # Get user-specific events
-        events = get_analytics(
+        # Get analytics service instance and call summary function
+        analytics_service = get_analytics_service()
+        stats_summary = analytics_service.get_user_stats_summary(
             user_id=user_id,
             start_date=start_date,
-            end_date=end_date,
-            limit=1000  # Higher limit for user-specific data
+            end_date=end_date
         )
         
-        # Prepare summary stats
-        pdf_processing_count = len([e for e in events if e.get("event_type") == AnalyticsEvent.PDF_PROCESSING])
-        search_count = len([e for e in events if e.get("event_type") == AnalyticsEvent.SEARCH])
-        question_count = len([e for e in events if e.get("event_type") == AnalyticsEvent.QUESTION])
-        
-        # Calculate average response times if available
-        response_times = [e.get("duration_ms") for e in events if e.get("duration_ms") is not None]
-        avg_response_time = sum(response_times) / len(response_times) if response_times else 0
-        
-        return jsonify({
-            "user_id": user_id,
-            "period": {
-                "start": start_date.isoformat() if start_date else None,
-                "end": end_date.isoformat() if end_date else None
-            },
-            "stats": {
-                "total_api_calls": len(events),
-                "pdf_processing": pdf_processing_count,
-                "searches": search_count,
-                "questions": question_count,
-                "avg_response_time": avg_response_time
-            },
-            "recent_activity": events[:10]  # Include recent activity
-        })
+        # The service function now returns the structure needed for the response
+        return jsonify(stats_summary)
+    except ValidationError as e:
+        logger.warning("Invalid date format/range in user-stats request", user_id=user_id, args=request.args, error=str(e))
+        # Raised by parse_date_range_args for invalid format/range
+        return jsonify({"error": "Invalid query parameters", "message": str(e)}), 400
+    except redis.exceptions.RedisError as redis_err:
+        logger.error("Redis error retrieving user stats summary", user_id=g.user.get('id', 'unknown'), error=str(redis_err), exc_info=True)
+        return jsonify({"error": "Failed to retrieve user stats due to a temporary issue.", "message": "Please try again later."}), 503 # Service Unavailable
     except Exception as e:
-        logger.error(f"Error retrieving user stats: {e}")
+        logger.error("Error retrieving user stats", user_id=g.user.get('id', 'unknown'), error=str(e), exc_info=True)
         return jsonify({
             "error": "Failed to retrieve user stats",
-            "message": str(e)
+            "message": "An internal error occurred."
         }), 500
 
 @analytics_bp.route("/export", methods=["GET"])
@@ -216,85 +221,53 @@ def export_analytics():
         # Parse parameters
         event_type = request.args.get("event_type")
         
-        start_date_str = request.args.get("start_date")
-        end_date_str = request.args.get("end_date")
+        # Parse date params using helper
+        start_date, end_date = parse_date_range_args(request.args)
         
-        start_date = None
-        if start_date_str:
-            start_date = datetime.fromisoformat(start_date_str)
-            
-        end_date = None
-        if end_date_str:
-            end_date = datetime.fromisoformat(end_date_str)
-            
+        # Validate export format parameter
         export_format = request.args.get("format", "json")
+        if export_format not in ["json", "csv"]:
+            logger.warning("Invalid export format requested", requested_format=export_format)
+            raise ValidationError(f"Invalid format specified: '{export_format}'. Use 'json' or 'csv'.")
         
-        # Get events with higher limit for export
+        # Get events with configured limit for export
+        export_limit = current_app.config.get('ANALYTICS_EXPORT_LIMIT', 10000)
         events = get_analytics(
             event_type=event_type,
             start_date=start_date,
             end_date=end_date,
-            limit=10000  # Higher limit for export
+            limit=export_limit
         )
         
         # Format response based on requested format
         if export_format == "csv":
-            import csv
-            from io import StringIO
-            
-            # Create CSV file in memory
-            output = StringIO()
-            
-            # Get all possible field names from events
-            fieldnames = set()
-            for event in events:
-                fieldnames.update(event.keys())
-                if "metadata" in event and isinstance(event["metadata"], dict):
-                    fieldnames.update([f"metadata_{k}" for k in event["metadata"].keys()])
-            
-            # Remove metadata field since we're flattening it
-            if "metadata" in fieldnames:
-                fieldnames.remove("metadata")
-            
-            # Create CSV writer
-            writer = csv.DictWriter(output, fieldnames=sorted(fieldnames))
-            writer.writeheader()
-            
-            # Write events to CSV
-            for event in events:
-                # Create a copy of the event
-                row = event.copy()
-                
-                # Flatten metadata
-                if "metadata" in row and isinstance(row["metadata"], dict):
-                    for k, v in row["metadata"].items():
-                        row[f"metadata_{k}"] = v
-                    del row["metadata"]
-                
-                writer.writerow(row)
-            
-            # Return CSV response
-            from flask import Response
-            return Response(
-                output.getvalue(),
-                mimetype="text/csv",
-                headers={
-                    "Content-Disposition": f"attachment;filename=analytics_export_{datetime.utcnow().strftime('%Y%m%d')}.csv"
-                }
-            )
-        else:
-            # Default to JSON
+            if not events:
+                csv_data = "" # Return empty string if no events
+            else:
+                # Define desired fieldnames for consistency, or let helper infer
+                # Example: fieldnames = ['timestamp', 'event_type', 'user_id', 'endpoint', 'status', 'duration_ms', 'error']
+                csv_data = generate_csv_string(events) # Let helper infer fields for now
+
+            # Create a Flask Response object for CSV download
+            response = make_response(csv_data)
+            timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+            response.headers["Content-Disposition"] = f"attachment; filename=analytics_export_{timestamp_str}.csv"
+            response.headers["Content-Type"] = "text/csv"
+            return response
+        elif export_format == "json":
+            # Return JSON response
             return jsonify({
                 "events": events,
                 "count": len(events),
-                "period": {
-                    "start": start_date.isoformat() if start_date else None,
-                    "end": end_date.isoformat() if end_date else None
-                }
+                "limit": export_limit
             })
+        # else: # Should not be reachable due to validation above
+        #    pass
+
+    except ValidationError as e:
+        # Raised by date parsing or format validation
+        logger.warning("Invalid parameter in export request", args=request.args, error=str(e))
+        return jsonify({"error": "Invalid query parameters", "message": str(e)}), 400
     except Exception as e:
-        logger.error(f"Error exporting analytics: {e}")
-        return jsonify({
-            "error": "Failed to export analytics",
-            "message": str(e)
-        }), 500 
+        logger.error("Error exporting analytics data", format=export_format, error=str(e), exc_info=True)
+        return jsonify({"error": "Failed to export analytics data"}), 500

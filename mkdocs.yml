@@ -1,0 +1,18 @@
+site_name: ChatLumos
+theme: readthedocs
+
+plugins:
+  - search
+  - autorefs
+  - mkdocstrings:
+      handlers:
+        python:
+          selection:
+            docstring_style: google
+          rendering:
+            show_source: true
+            show_root_heading: true
+
+nav:
+  - Úvod: index.md
+  - API Reference: reference/api.md

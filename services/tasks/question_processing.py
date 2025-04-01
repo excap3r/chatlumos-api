@@ -1,316 +1,257 @@
 import json
 import time
 import logging
+from datetime import datetime
+import os
+import redis
+from dotenv import load_dotenv
+import traceback
+import structlog
 
-# Assuming ServiceError is defined elsewhere
-from services.api_gateway import ServiceError 
-# Import helper
-from services.utils.api_helpers import get_cache_key
+# Import the Celery app instance
+from ....celery_app import celery_app # Adjusted relative import
+from services.config import AppConfig # Added
+from services.llm_service import LLMService
+from services.vector_search import VectorSearchService
+from services.utils.error_utils import ServiceError # Use shared error type
 
-# Default value - consider making this configurable via app context or env var
-DEFAULT_TOP_K = 10
+# Load env vars at module level for worker
+load_dotenv()
 
-def process_question_async(question, session_id, logger, progress_events, api_gateway, redis_client):
-    """
-    Process a question asynchronously, sending progress updates.
-    
-    Args:
-        question: The question to process
-        session_id: The session ID for tracking progress
-        logger: Logger instance
-        progress_events: Dictionary for progress queues
-        api_gateway: API Gateway client instance
-        redis_client: Redis client instance or None
-    """
-    event_queue = progress_events.get(session_id)
-    if not event_queue:
-        logger.error(f"Error: No event queue found for session {session_id}")
-        return
-    
+# Configure logger
+logger = structlog.get_logger(__name__)
+# Basic config if running standalone (adjust as needed)
+# if not logger.hasHandlers(): # Removing this, assuming standard logging setup
+#     logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+
+# --- Removed Mock/Unused API Gateway --- 
+# class APIGateway:
+#     ...
+# class ServiceError(Exception):
+#     pass
+
+# --- Helper to get Redis Client (using AppConfig) ---
+def get_redis_client():
+    redis_url = AppConfig.REDIS_URL
+    if not redis_url:
+        logger.error("REDIS_URL not found in AppConfig.")
+        return None
     try:
-        # Initialize process steps
-        process_steps = [
-            {"id": "decompose", "name": "Analyzing question", "status": "pending", "details": None},
-            {"id": "search", "name": "Searching knowledge base", "status": "pending", "details": None},
-            {"id": "answer", "name": "Generating answer", "status": "pending", "details": None}
-        ]
-        
-        # Send initial process steps
-        logger.info(f"[Session {session_id}] Initializing process steps")
-        event_queue.put({
-            "event": "process_init",
-            "process_steps": process_steps,
-            "progress": 0
-        })
-        
-        # Calculate progress increment per step
-        progress_increment = 100.0 / len(process_steps)
-        current_progress = 0
-        
-        # Track result data
-        result_data = {
-            "question": question,
-            "sub_questions": [],
-            "search_results": {},
-            "answer": "",
-            "error": None
+        # Use decode_responses=True for easier handling
+        client = redis.from_url(redis_url, decode_responses=True)
+        client.ping() # Verify connection
+        logger.info("Redis client connected successfully for task.")
+        return client
+    except Exception as e:
+        logger.error(f"Failed to connect to Redis: {e}", exc_info=True)
+        return None
+
+# --- Removed get_api_gateway() --- 
+# def get_api_gateway():
+#     ...
+
+# Initialize services (consider dependency injection) - Services are now initialized within the task
+# llm_service = LLMService()
+# vector_service = VectorSearchService()
+
+# Decorate the function as a Celery task
+@celery_app.task(bind=True, autoretry_for=(Exception,), retry_backoff=True, retry_kwargs={'max_retries': 3}) # Added basic retry
+def process_question_task(self, task_id: str, data: dict):
+    """Processes a question asynchronously, updating progress in Redis."""
+    logger = structlog.get_logger(f"task.{self.request.id}") # Task-specific logger instance
+    logger.info(f"Starting question processing task", passed_task_id=task_id, data=data)
+    
+    # Initialize clients/services within the task using AppConfig
+    redis_client = get_redis_client()
+    redis_key = f"task:{task_id}"
+    pubsub_channel = f"progress:{task_id}"
+
+    llm_service: Optional[LLMService] = None
+    vector_service: Optional[VectorSearchService] = None
+
+    try:
+        # Create a temporary config dict from AppConfig attributes for service init
+        # This avoids passing the whole class if attributes are simple types
+        # Adjust if AppConfig becomes more complex
+        config_dict = {
+            attr: getattr(AppConfig, attr)
+            for attr in dir(AppConfig)
+            if not callable(getattr(AppConfig, attr)) and not attr.startswith("__")
         }
+        llm_service = LLMService(config=config_dict)
+        vector_service = VectorSearchService(config=config_dict)
+        logger.info("LLM and Vector Search services initialized for task.")
+    except Exception as service_init_err:
+         logger.error("Failed to initialize services within task", error=str(service_init_err), exc_info=True)
+         # Update state and raise if services are critical
+         if redis_client:
+              # Use internal helper to prevent code duplication
+              _update_task_progress(redis_client, redis_key, pubsub_channel, task_id, logger,
+                                    status="Failed", progress=0,
+                                    details="Service initialization failed.",
+                                    error=f"Service init error: {service_init_err}")
+         self.update_state(state='FAILURE', meta={'exc_type': type(service_init_err).__name__, 'exc_message': f"Service init failed: {service_init_err}"})
+         raise # Re-raise to trigger Celery failure/retry logic
+
+    # Check if essential clients are available
+    if not redis_client:
+        logger.critical("Cannot proceed without Redis connection.")
+        self.update_state(state='FAILURE', meta={'exc_type': 'ConnectionError', 'exc_message': 'Redis client unavailable'})
+        # No need to raise again if state is set
+        return {"error": "Redis client unavailable"} # Return error info
+
+    if not llm_service or not vector_service:
+        logger.critical("Cannot proceed without LLM or Vector Search service.")
+        _update_task_progress(redis_client, redis_key, pubsub_channel, task_id, logger,
+                              status="Failed", progress=0,
+                              details="Core service initialization failed.",
+                              error="LLM or Vector Search service unavailable")
+        self.update_state(state='FAILURE', meta={'exc_type': 'RuntimeError', 'exc_message': 'LLM/Vector Search service unavailable'})
+        return {"error": "LLM/Vector Search service unavailable"}
+
+    try:
+        logger.info("Starting question processing logic.")
+        _update_task_progress(redis_client, redis_key, pubsub_channel, task_id, logger,
+                              status="Processing", progress=10, details="Starting analysis")
+
+        question = data.get('question')
+        user_id = data.get('user_id') # Get user_id if passed
         
-        # Step 1: Decompose the question
-        logger.info(f"[Session {session_id}] Decomposing question: {question}")
-        event_queue.put({
-            "event": "process_update",
-            "step_id": "decompose",
-            "status": "running"
-        })
-        
-        sub_questions = [question] # Default
+        # --- Get config from data dict, falling back to AppConfig --- 
+        index_name = data.get('index_name', AppConfig.PINECONE_INDEX_NAME) # Use request value or default
         try:
-            # Check cache first if available
-            cache_hit = False
-            if redis_client:
-                cache_key = get_cache_key("decompose", question) 
-                cached_result = redis_client.get(cache_key)
-                if cached_result:
-                    decompose_result = json.loads(cached_result)
-                    cache_hit = True
-                    logger.info(f"[Session {session_id}] Cache hit for decomposition")
-            
-            if not cache_hit:
-                # Use LLM service to decompose question
-                decompose_result = api_gateway.request(
-                    "llm", 
-                    "/decompose_question", 
-                    method="POST",
-                    json={"question": question}
-                )
-                
-                # Cache the result
-                if redis_client and "error" not in decompose_result:
-                    redis_client.setex(
-                        cache_key, 
-                        3600,  # 1 hour cache
-                        json.dumps(decompose_result)
-                    )
-            
-            if "error" in decompose_result:
-                raise Exception(f"Error decomposing question: {decompose_result['error']}")
-                
-            sub_questions = decompose_result.get("sub_questions", [question])
-            result_data["sub_questions"] = sub_questions
-            
-            # Mark step as complete
-            current_progress += progress_increment
-            event_queue.put({
-                "event": "process_update",
-                "step_id": "decompose",
-                "status": "complete",
-                "details": {
-                    "sub_questions": sub_questions
-                },
-                "progress": min(int(current_progress), 99)
-            })
-        except Exception as e:
-            logger.error(f"[Session {session_id}] Error in decomposition: {str(e)}", exc_info=True)
-            event_queue.put({
-                "event": "process_update",
-                "step_id": "decompose",
-                "status": "error",
-                "details": {"error": str(e)}
-            })
-            # Fall back to using the original question
-            sub_questions = [question]
-            result_data["sub_questions"] = sub_questions
-            result_data["error"] = f"Error during question analysis: {str(e)}"
-            # Do not stop processing, just use original question
-            # Update progress anyway
-            current_progress += progress_increment 
-            event_queue.put({
-                "event": "process_update",
-                "step_id": "decompose",
-                "status": "complete_with_fallback",
-                "details": {"fallback_reason": str(e), "sub_questions": sub_questions},
-                "progress": min(int(current_progress), 99)
-            })
+            # Attempt to get top_k from data, ensuring it's an int
+            top_k_raw = data.get('top_k')
+            if top_k_raw is not None:
+                 top_k = int(top_k_raw)
+            else:
+                 top_k = AppConfig.DEFAULT_TOP_K
+        except (ValueError, TypeError):
+            logger.warning(f"Invalid top_k value '{top_k_raw}' received, using default {AppConfig.DEFAULT_TOP_K}")
+            top_k = AppConfig.DEFAULT_TOP_K
+        # --- End Config Extraction --- 
 
-        
-        # Step 2: Search for each sub-question
-        logger.info(f"[Session {session_id}] Searching for {len(sub_questions)} sub-questions")
-        event_queue.put({
-            "event": "process_update",
-            "step_id": "search",
-            "status": "running"
-        })
-        
-        all_results = []
-        search_errors = []
+        if not question:
+            raise ValueError("Question is required in task data")
+        if not user_id:
+             logger.warning("user_id not provided in task data, search may not be user-specific.")
+             # Decide how to handle missing user_id (e.g., raise error, proceed without user filter)
+             # For now, proceed but log warning. The vector_service.query should handle user_id internally.
+
+        # Step 1: Search using VectorSearchService
+        _update_task_progress(redis_client, redis_key, pubsub_channel, task_id, logger,
+                              status="Processing", progress=30, details=f"Searching index '{index_name}' using top_k={top_k}...") # Updated log
+
         try:
-            for sub_q in sub_questions:
-                try:
-                    # Check cache first if available
-                    cache_hit = False
-                    if redis_client:
-                        cache_key = get_cache_key("search", sub_q, DEFAULT_TOP_K)
-                        cached_result = redis_client.get(cache_key)
-                        if cached_result:
-                            search_result = json.loads(cached_result)
-                            cache_hit = True
-                            logger.info(f"[Session {session_id}] Cache hit for search: {sub_q[:30]}...")
-                    
-                    if not cache_hit:
-                        # Generate embedding and search using vector service
-                        search_result = api_gateway.request(
-                            "vector", 
-                            "/search", 
-                            method="POST",
-                            json={
-                                "query": sub_q,
-                                "top_k": DEFAULT_TOP_K
-                            }
-                        )
-                        
-                        # Cache the result
-                        if redis_client and "error" not in search_result:
-                            redis_client.setex(
-                                cache_key, 
-                                3600 * 24,  # 24 hour cache
-                                json.dumps(search_result)
-                            )
+            # Assuming user_id is needed for filtering in the query method
+            search_results_raw = vector_service.query(user_id=user_id, query_text=question, top_k=top_k, index_name=index_name)
+            # Extract context (assuming 'metadata' contains 'text' or similar)
+            context_list = []
+            for res in search_results_raw:
+                if 'metadata' in res and 'text' in res['metadata']:
+                    context_list.append(res['metadata']['text'])
+                elif 'text' in res: # Fallback if text is top-level
+                     context_list.append(res['text'])
+            context = "\n".join(context_list) # Join context pieces
+            logger.info("Search completed.", num_results=len(search_results_raw), context_length=len(context))
 
-                    if "error" in search_result:
-                        raise Exception(f"Error searching for '{sub_q}': {search_result['error']}")
+        except Exception as search_err:
+            logger.error("Error during vector search", error=str(search_err), exc_info=True)
+            raise ServiceError(f"Search service error: {search_err}") from search_err
 
-                    # Collect results
-                    found_results = search_result.get("results", [])
-                    result_data["search_results"][sub_q] = found_results
-                    all_results.extend(found_results)
-                    logger.info(f"[Session {session_id}] Found {len(found_results)} results for: {sub_q[:30]}...")
+        if not context:
+            result_data = {"answer": "I couldn't find relevant information to answer your question."}
+            _update_task_progress(redis_client, redis_key, pubsub_channel, task_id, logger,
+                                  status="Completed", progress=100, details="No relevant context found.", result=result_data)
+            return result_data # Return result for Celery backend
 
-                except Exception as sub_e:
-                    logger.error(f"[Session {session_id}] Error searching for sub-question '{sub_q}': {str(sub_e)}")
-                    search_errors.append(str(sub_e))
-                    result_data["search_results"][sub_q] = [] # Ensure key exists
-            
-            # Mark step as complete (even if some searches failed)
-            current_progress += progress_increment
-            event_queue.put({
-                "event": "process_update",
-                "step_id": "search",
-                "status": "complete" if not search_errors else "complete_with_errors",
-                "details": {
-                    "total_results": len(all_results),
-                    "errors": search_errors
-                },
-                "progress": min(int(current_progress), 99)
-            })
-
-        except Exception as e:
-            logger.error(f"[Session {session_id}] Critical error during search phase: {str(e)}", exc_info=True)
-            event_queue.put({
-                "event": "process_update",
-                "step_id": "search",
-                "status": "error",
-                "details": {"error": str(e)}
-            })
-            # Cannot proceed without search results
-            result_data["error"] = f"Critical error during knowledge search: {str(e)}"
-            raise # Re-raise to be caught by outer try/except
-            
-        # Step 3: Generate answer
-        logger.info(f"[Session {session_id}] Generating answer based on {len(all_results)} results")
-        event_queue.put({
-            "event": "process_update",
-            "step_id": "answer",
-            "status": "running"
-        })
-        
+        # Step 2: Generate answer using LLMService
+        _update_task_progress(redis_client, redis_key, pubsub_channel, task_id, logger,
+                              status="Processing", progress=70, details="Generating answer...")
         try:
-            if not all_results:
-                 raise Exception("No search results found to generate an answer.")
+            # Combine search results into a context string for the LLM
+            context_for_llm = "\n\n".join([res['metadata'].get('text', '') for res in search_results_raw if res.get('metadata', {}).get('text')])
 
-            # Prepare context from search results
-            context = "\n".join([r.get("text", "") for r in all_results])
-            
-            # Check cache first if available
-            cache_hit = False
-            if redis_client:
-                # Use a hash of the question and search result IDs as cache key
-                result_ids = sorted([r.get("id", "") for r in all_results])
-                cache_key = get_cache_key("answer", question, "-".join(result_ids[:20]))
-                cached_result = redis_client.get(cache_key)
-                if cached_result:
-                    answer_result = json.loads(cached_result)
-                    cache_hit = True
-                    logger.info(f"[Session {session_id}] Cache hit for answer generation")
-            
-            if not cache_hit:
-                # Use LLM service to generate answer
-                answer_result = api_gateway.request(
-                    "llm", 
-                    "/generate_answer", 
-                    method="POST",
-                    json={
-                        "question": question,
-                        "context": context
-                    }
-                )
-                
-                # Cache the result
-                if redis_client and "error" not in answer_result:
-                    redis_client.setex(
-                        cache_key, 
-                        3600 * 12,  # 12 hour cache
-                        json.dumps(answer_result)
-                    )
+            # Use the generate_answer method of the initialized llm_service
+            llm_response = llm_service.generate_answer(
+                question=question,
+                search_results=search_results_raw, # Pass raw results if needed by method, or just context
+                # context=context_for_llm, # If method expects context string
+                # provider_name=None, # Use default provider
+                # model=None # Use default model
+            )
 
-            if "error" in answer_result:
-                raise Exception(f"Error generating answer: {answer_result['error']}")
+            if llm_response.is_error:
+                 raise ServiceError(f"LLM service error: {llm_response.error}")
 
-            answer = answer_result.get("answer", "Could not generate an answer.")
-            result_data["answer"] = answer
+            final_answer = llm_response.content if isinstance(llm_response.content, str) else str(llm_response.content)
+            final_result_data = {"answer": final_answer}
+            logger.info("Answer generation completed.")
 
-            # Mark step as complete
-            current_progress = 100 # Final step completes progress
-            event_queue.put({
-                "event": "process_update",
-                "step_id": "answer",
-                "status": "complete",
-                "details": {
-                    "answer_length": len(answer)
-                },
-                "progress": current_progress
-            })
+        except Exception as generate_err:
+            logger.error("Error during answer generation", error=str(generate_err), exc_info=True)
+            raise ServiceError(f"LLM service error: {generate_err}") from generate_err
 
-        except Exception as e:
-            logger.error(f"[Session {session_id}] Error in answer generation: {str(e)}", exc_info=True)
-            event_queue.put({
-                "event": "process_update",
-                "step_id": "answer",
-                "status": "error",
-                "details": {"error": str(e)}
-            })
-            result_data["answer"] = "Error generating answer."
-            result_data["error"] = f"Error during answer generation: {str(e)}"
-            # Proceed to final result despite error
 
-        # Send final result event
-        event_queue.put({
-            "event": "final_result",
-            "data": result_data
-        })
-        logger.info(f"[Session {session_id}] Processing complete.")
+        # Step 3: Finalize
+        _update_task_progress(redis_client, redis_key, pubsub_channel, task_id, logger,
+                              status="Completed", progress=100, details="Answer generated successfully.", result=final_result_data)
+        logger.info("Question processing task completed successfully.")
+        return final_result_data # Return final result for Celery backend
 
     except Exception as e:
-        # Catch errors from Step 2 re-raise or other unexpected errors
-        logger.error(f"[Session {session_id}] Unhandled error in process_question_async: {str(e)}", exc_info=True)
-        if event_queue: # Check if queue exists before putting error
-            event_queue.put({
-                "event": "process_error",
-                "error": f"Unhandled processing error: {str(e)}"
-            })
-    finally:
-        if event_queue: # Check if queue exists before signaling end
+        logger.error("Unhandled error during question processing task", error=str(e), exc_info=True)
+        error_message = f"An error occurred: {str(e)}"
+        if redis_client:
+            _update_task_progress(redis_client, redis_key, pubsub_channel, task_id, logger,
+                                  status="Failed", progress=100, details=error_message, error=str(e))
+        # Update Celery state before raising
+        self.update_state(state='FAILURE', meta={'exc_type': type(e).__name__, 'exc_message': traceback.format_exc()}) # Include traceback
+        raise # Re-raise the exception to ensure Celery knows it failed
+
+# --- Remove unused async function and helpers --- 
+# def process_question_async(question, session_id, logger, progress_events, api_gateway, redis_client):
+#    ...
+
+# --- Internal Helper Function for Progress Updates ---
+def _update_task_progress(redis_client, redis_key, pubsub_channel, task_id, task_logger,
+                          status: str, progress: int, details: str = "", result: Any = None, error: str = None):
+    """Helper function to update task state in Redis hash and publish to Pub/Sub."""
+    if not redis_client:
+        task_logger.error("Redis client unavailable during progress update.")
+        return
+    try:
+        update_data = {
+            'status': status,
+            'progress': progress,
+            'details': details,
+            'updated_at': datetime.utcnow().isoformat(),
+            'task_id': task_id
+        }
+        result_json = None
+        if result is not None:
             try:
-                event_queue.put(None)  # Signal end of processing
-            except Exception as q_e:
-                 logger.error(f"[Session {session_id}] Error signaling end of processing: {q_e}") 
+                # Attempt to serialize result to JSON
+                result_json = json.dumps(result)
+                update_data['result'] = result_json
+            except TypeError as e:
+                task_logger.warning("Result data is not JSON serializable", error=str(e))
+                # Store a representation or error message instead
+                update_data['result'] = json.dumps({"error": "Result data not serializable", "type": type(result).__name__})
+        if error is not None:
+            update_data['error'] = str(error) # Ensure error is string
+
+        # Update the Redis Hash (use hmset for atomic update of multiple fields)
+        redis_client.hmset(redis_key, update_data)
+        task_logger.info("Progress Hash updated", status=status, progress=progress)
+
+        # Publish the update to the Pub/Sub channel
+        # Prepare message for pub/sub (use the same data written to hash)
+        publish_message = json.dumps(update_data)
+        redis_client.publish(pubsub_channel, publish_message)
+        task_logger.info("Published update to Pub/Sub channel", channel=pubsub_channel)
+
+    except redis.exceptions.RedisError as redis_err:
+        task_logger.error("Redis error during progress update", error=str(redis_err), exc_info=True)
+    except Exception as e:
+        task_logger.error("Unexpected error during progress update", error=str(e), exc_info=True) 

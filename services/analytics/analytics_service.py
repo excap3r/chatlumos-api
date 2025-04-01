@@ -1,477 +1,528 @@
 #!/usr/bin/env python3
 """
-Analytics Service Implementation
+Analytics Service Module
 
-This module implements analytics collection, storage, and reporting functionality.
+Provides analytics event tracking and reporting capabilities using Redis.
 """
 
 import os
 import time
 import json
 import uuid
-import logging
+import structlog
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional, Tuple
-from flask import Flask, request, jsonify, g
-from flask_cors import CORS
+from flask import Flask, request, jsonify, g, current_app # Keep g for track_api_call
 import redis
-from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv()
-
-# Initialize Flask app
-app = Flask(__name__)
-CORS(app)
-
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger('analytics_service')
-
-# Initialize Redis for analytics if available
-redis_url = os.getenv("REDIS_URL")
-redis_client = None
-if redis_url:
-    try:
-        redis_client = redis.from_url(redis_url)
-        logger.info(f"Connected to Redis at {redis_url}")
-    except Exception as e:
-        logger.error(f"Failed to connect to Redis: {e}")
+# Configure logger
+logger = structlog.get_logger(__name__)
 
 # Constants
-API_VERSION = "v1"
-ANALYTICS_TTL = 60 * 60 * 24 * 30  # 30 days retention
+DEFAULT_ANALYTICS_TTL = 60 * 60 * 24 * 30  # 30 days
 
 class AnalyticsEvent:
     """Analytics event data structure"""
-    
+    # Event Types
     API_CALL = "api_call"
     PDF_PROCESSING = "pdf_processing"
     SEARCH = "search"
     QUESTION = "question"
     USER_AUTH = "user_auth"
     ERROR = "error"
-    
+    CELERY_TASK = "celery_task"
+
     def __init__(
-        self, 
+        self,
         event_type: str,
-        endpoint: str = None,
-        user_id: str = None,
+        user_id: Optional[str] = None,
+        endpoint: Optional[str] = None,
+        task_name: Optional[str] = None,
         duration_ms: Optional[float] = None,
         status_code: Optional[int] = None,
+        status: Optional[str] = None,
         error: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None
     ):
-        """
-        Initialize analytics event.
-        
-        Args:
-            event_type: Type of event (API_CALL, PDF_PROCESSING, etc.)
-            endpoint: API endpoint
-            user_id: User ID if authenticated
-            duration_ms: Request duration in milliseconds
-            status_code: HTTP status code
-            error: Error message if applicable
-            metadata: Additional event metadata
-        """
         self.id = str(uuid.uuid4())
         self.timestamp = datetime.utcnow().isoformat()
         self.event_type = event_type
-        self.endpoint = endpoint
         self.user_id = user_id
+        self.endpoint = endpoint
+        self.task_name = task_name
         self.duration_ms = duration_ms
         self.status_code = status_code
+        self.status = status
         self.error = error
         self.metadata = metadata or {}
-        
-        # Add request information if available
-        if request:
-            self.metadata.update({
-                "ip": request.remote_addr,
-                "user_agent": request.user_agent.string if request.user_agent else None,
-                "method": request.method,
-                "origin": request.headers.get("Origin"),
-                "referer": request.headers.get("Referer")
-            })
-    
+
+        # Conditionally add request info only if running within a request context
+        if event_type == self.API_CALL and request:
+             try:
+                 # Check if request object is available (might not be in background tasks)
+                 if request.remote_addr:
+                     self.metadata.update({
+                        "ip": request.remote_addr,
+                        "user_agent": request.user_agent.string if request.user_agent else None,
+                        "method": request.method,
+                        "origin": request.headers.get("Origin"),
+                        "referer": request.headers.get("Referer")
+                     })
+             except RuntimeError:
+                  logger.debug("Cannot add request metadata outside request context.")
+
     def to_dict(self) -> Dict[str, Any]:
-        """Convert event to dictionary"""
-        return {
+        """Convert event to dictionary, filtering out None values."""
+        data = {
             "id": self.id,
             "timestamp": self.timestamp,
             "event_type": self.event_type,
-            "endpoint": self.endpoint,
             "user_id": self.user_id,
+            "endpoint": self.endpoint,
+            "task_name": self.task_name,
             "duration_ms": self.duration_ms,
             "status_code": self.status_code,
+            "status": self.status,
             "error": self.error,
             "metadata": self.metadata
         }
+        return {k: v for k, v in data.items() if v is not None}
 
-def track_event(event: AnalyticsEvent) -> bool:
-    """
-    Track an analytics event.
-    
-    Args:
-        event: AnalyticsEvent to track
-        
-    Returns:
-        Success status
-    """
-    if not redis_client:
-        logger.warning("Redis not available, analytics event not tracked")
-        return False
-    
-    try:
-        # Create timestamp-based key
-        date_str = datetime.utcnow().strftime("%Y-%m-%d")
-        key = f"analytics:{event.event_type}:{date_str}"
-        
-        # Store event in Redis
-        redis_client.lpush(key, json.dumps(event.to_dict()))
-        redis_client.expire(key, ANALYTICS_TTL)
-        
-        # Also store in user-specific list if user_id is available
-        if event.user_id:
-            user_key = f"analytics:user:{event.user_id}:{date_str}"
-            redis_client.lpush(user_key, json.dumps(event.to_dict()))
-            redis_client.expire(user_key, ANALYTICS_TTL)
-        
-        # Update counters
-        if event.endpoint:
-            endpoint_key = f"analytics:counter:endpoint:{event.endpoint}:{date_str}"
-            redis_client.incr(endpoint_key)
-            redis_client.expire(endpoint_key, ANALYTICS_TTL)
-        
-        # Track errors
-        if event.error:
-            error_key = f"analytics:errors:{date_str}"
-            redis_client.lpush(error_key, json.dumps(event.to_dict()))
-            redis_client.expire(error_key, ANALYTICS_TTL)
-        
-        return True
-    except Exception as e:
-        logger.error(f"Error tracking analytics event: {e}")
-        return False
+class AnalyticsService:
+    """Service class for managing analytics events using Redis."""
 
-def track_api_call(start_time: float) -> None:
-    """
-    Track an API call.
-    
-    Args:
-        start_time: Request start time (from time.time())
-    """
-    duration_ms = (time.time() - start_time) * 1000  # Convert to milliseconds
-    
-    # Create event
-    event = AnalyticsEvent(
-        event_type=AnalyticsEvent.API_CALL,
-        endpoint=request.path,
-        user_id=g.get('user', {}).get('id') if hasattr(g, 'user') else None,
-        duration_ms=duration_ms,
-        status_code=getattr(request, '_status_code', 200),
-        error=getattr(request, '_error', None),
-        metadata={
-            "query_params": dict(request.args),
-            "content_type": request.content_type
-        }
-    )
-    
-    track_event(event)
+    def __init__(self, config: Dict[str, Any], db_pool: Optional[Any] = None):
+        """Initialize the AnalyticsService."""
+        self.config = config
+        # db_pool is passed but not used here currently, store if needed later
+        self.db_pool = db_pool
+        self.redis_client: Optional[redis.Redis] = None
+        self.analytics_ttl = self.config.get('ANALYTICS_TTL_SECONDS', DEFAULT_ANALYTICS_TTL)
 
-def get_analytics(
-    event_type: Optional[str] = None,
-    user_id: Optional[str] = None,
-    start_date: Optional[datetime] = None,
-    end_date: Optional[datetime] = None,
-    limit: int = 100
-) -> List[Dict[str, Any]]:
-    """
-    Get analytics events.
-    
-    Args:
-        event_type: Filter by event type
-        user_id: Filter by user ID
-        start_date: Start date for range filter
-        end_date: End date for range filter
-        limit: Maximum number of events to return
-        
-    Returns:
-        List of event dictionaries
-    """
-    if not redis_client:
-        logger.warning("Redis not available, cannot retrieve analytics")
-        return []
-    
-    try:
-        events = []
-        
-        # Set date range
-        if not start_date:
-            start_date = datetime.utcnow() - timedelta(days=7)
-        if not end_date:
-            end_date = datetime.utcnow()
-        
-        # Generate date range
-        current_date = start_date
-        while current_date <= end_date:
-            date_str = current_date.strftime("%Y-%m-%d")
+        # Get Redis client instance from the application context/config
+        # Assumes app.py stores the initialized client on the app object
+        try:
+            # Check both potential locations for flexibility during transition
+            if hasattr(current_app, 'redis_client') and current_app.redis_client:
+                self.redis_client = current_app.redis_client
+            elif 'REDIS_CLIENT' in current_app.config and current_app.config['REDIS_CLIENT']:
+                 self.redis_client = current_app.config['REDIS_CLIENT']
+
+            if self.redis_client and self.redis_client.ping():
+                logger.info("AnalyticsService connected to Redis successfully.")
+            elif self.redis_client:
+                logger.warning("Redis client found in config, but ping failed. Analytics disabled.")
+                self.redis_client = None
+        except RuntimeError:
+            logger.error("AnalyticsService init error: Not in a Flask application context during init?")
+            self.redis_client = None
+        except redis.exceptions.ConnectionError as e:
+            logger.error("AnalyticsService init error: Redis connection failed.", error=str(e))
+            self.redis_client = None
+        except Exception as e:
+            logger.error("AnalyticsService init error: Unexpected error getting Redis client.", error=str(e), exc_info=True)
+            self.redis_client = None
+
+    def track_event(self, event: AnalyticsEvent) -> bool:
+        """
+        Track an analytics event using the initialized Redis client.
+        """
+        if not self.redis_client:
+            logger.debug("Analytics tracking skipped: Redis client not available.", event_type=event.event_type)
+            return False
+
+        try:
+            event_dict = event.to_dict()
+            event_json = json.dumps(event_dict)
+            try:
+                event_dt = datetime.fromisoformat(event.timestamp.replace('Z', '+00:00'))
+                date_str = event_dt.strftime("%Y-%m-%d")
+            except ValueError:
+                date_str = datetime.utcnow().strftime("%Y-%m-%d")
+                logger.warning("Could not parse event timestamp, using current date for key", event_timestamp=event.timestamp)
+
+            pipe = self.redis_client.pipeline()
+            key = f"analytics:{event.event_type}:{date_str}"
+            pipe.lpush(key, event_json)
+            pipe.expire(key, self.analytics_ttl)
+
+            if event.user_id:
+                user_key = f"analytics:user:{event.user_id}:{date_str}"
+                pipe.lpush(user_key, event_json)
+                pipe.expire(user_key, self.analytics_ttl)
+
+            if event.endpoint:
+                endpoint_key = f"analytics:counter:endpoint:{event.endpoint}:{date_str}"
+                pipe.incr(endpoint_key)
+                pipe.expire(endpoint_key, self.analytics_ttl)
             
-            # Determine key pattern based on filters
-            if user_id:
-                key_pattern = f"analytics:user:{user_id}:{date_str}"
-            elif event_type:
-                key_pattern = f"analytics:{event_type}:{date_str}"
-            else:
-                # If no specific filter, we need to check multiple keys
-                for evt_type in [
-                    AnalyticsEvent.API_CALL,
-                    AnalyticsEvent.PDF_PROCESSING,
-                    AnalyticsEvent.SEARCH,
-                    AnalyticsEvent.QUESTION,
-                    AnalyticsEvent.USER_AUTH,
-                    AnalyticsEvent.ERROR
-                ]:
-                    key = f"analytics:{evt_type}:{date_str}"
-                    data = redis_client.lrange(key, 0, limit - len(events))
-                    for item in data:
-                        events.append(json.loads(item))
-                        if len(events) >= limit:
-                            return events
-                
-                current_date += timedelta(days=1)
-                continue
-            
-            # Get data for the specific key
-            data = redis_client.lrange(key_pattern, 0, limit - len(events))
-            for item in data:
-                events.append(json.loads(item))
-                if len(events) >= limit:
-                    return events
-            
-            current_date += timedelta(days=1)
-        
-        return events
-    except Exception as e:
-        logger.error(f"Error retrieving analytics: {e}")
-        return []
+            if event.task_name:
+                task_key = f"analytics:counter:task:{event.task_name}:{date_str}"
+                pipe.incr(task_key)
+                pipe.expire(task_key, self.analytics_ttl)
 
-def get_analytics_summary(
-    start_date: Optional[datetime] = None,
-    end_date: Optional[datetime] = None
-) -> Dict[str, Any]:
-    """
-    Get analytics summary with aggregated metrics.
-    
-    Args:
-        start_date: Start date for range filter
-        end_date: End date for range filter
+            if event.error:
+                error_key = f"analytics:errors:{date_str}"
+                pipe.lpush(error_key, event_json)
+                pipe.expire(error_key, self.analytics_ttl)
+
+            results = pipe.execute()
+            logger.debug("Analytics event tracked via Redis pipeline", event_id=event.id, event_type=event.event_type)
+            return True
+        except redis.exceptions.RedisError as e:
+            logger.error("Redis error tracking analytics event", event_id=event.id, error=str(e), exc_info=True)
+            return False
+        except Exception as e:
+            logger.error("Unexpected error tracking analytics event", event_id=event.id, error=str(e), exc_info=True)
+            return False
+
+    def track_api_call(self, response, start_time: float) -> None:
+        """
+        Track an API call. Intended to be called from Flask `after_request`.
+        Uses Flask's `g` for user info and `request` for details.
+        """
+        if not self.redis_client:
+            return # Cannot track if Redis is unavailable
         
-    Returns:
-        Summary dictionary with metrics
-    """
-    if not redis_client:
-        logger.warning("Redis not available, cannot retrieve analytics summary")
-        return {}
+        try:
+            # Check if request is available and has necessary attributes
+            if not request or not hasattr(request, 'path') or not hasattr(request, 'method'):
+                 logger.debug("Skipping analytics tracking: Request context or attributes missing.")
+                 return
+                 
+            excluded_paths = self.config.get('ANALYTICS_EXCLUDE_PATHS', ['/health', '/metrics'])
+            if request.path in excluded_paths or request.method == 'OPTIONS':
+                 logger.debug("Skipping analytics tracking for excluded path/method", path=request.path, method=request.method)
+                 return
     
-    try:
-        # Set date range
-        if not start_date:
-            start_date = datetime.utcnow() - timedelta(days=7)
-        if not end_date:
-            end_date = datetime.utcnow()
-        
-        summary = {
-            "period": {
-                "start": start_date.isoformat(),
-                "end": end_date.isoformat()
-            },
-            "total_api_calls": 0,
-            "total_users": set(),
-            "endpoints": {},
-            "errors": 0,
-            "pdf_processing": 0,
-            "searches": 0,
-            "questions": 0,
-            "performance": {
-                "avg_response_time": 0,
-                "p95_response_time": 0,
-                "max_response_time": 0
+            duration_ms = (time.time() - start_time) * 1000
+    
+            user_id = None
+            if hasattr(g, 'user_id'):
+                user_id = g.user_id
+            elif hasattr(g, 'user') and isinstance(g.user, dict):
+                user_id = g.user.get('id')
+    
+            error_message = None
+            status = 'success' if response.status_code < 400 else 'error'
+            if status == 'error':
+                try:
+                    error_data = response.get_json()
+                    if error_data and isinstance(error_data, dict):
+                        error_message = error_data.get('error') or error_data.get('message') or json.dumps(error_data)
+                    else:
+                        error_message = response.get_data(as_text=True)[:500]
+                except Exception:
+                    # Handle cases where response is not JSON or reading fails
+                    try:
+                         error_message = response.get_data(as_text=True)[:500]
+                    except Exception as data_ex:
+                         logger.warning("Could not get error details from response data", exc=str(data_ex))
+                         error_message = f"Status Code {response.status_code}"
+    
+            # Create event (metadata added automatically using request)
+            event = AnalyticsEvent(
+                event_type=AnalyticsEvent.API_CALL,
+                user_id=user_id,
+                endpoint=request.path,
+                duration_ms=duration_ms,
+                status_code=response.status_code,
+                status=status,
+                error=error_message
+            )
+            self.track_event(event) # Call the class method
+            
+        except RuntimeError as e:
+             # Catch errors accessing request/g outside of context (shouldn't happen in after_request)
+             logger.error("RuntimeError during track_api_call (likely request context issue)", error=str(e), exc_info=True)
+        except Exception as e:
+             logger.error("Unexpected error during track_api_call", error=str(e), exc_info=True)
+
+    def get_analytics(
+        self,
+        event_type: Optional[str] = None,
+        user_id: Optional[str] = None,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+        page: int = 1,
+        page_size: int = 100
+    ) -> Dict[str, Any]:
+        """
+        Retrieve a paginated list of analytics events from Redis.
+
+        Note: Currently fetches all matching events then slices for pagination
+              due to Redis List storage limitations for efficient cursor/offset.
+
+        Args:
+            event_type: Filter by event type.
+            user_id: Filter by user ID.
+            start_date: Start date filter.
+            end_date: End date filter.
+            page: Page number (1-indexed).
+            page_size: Number of items per page.
+
+        Returns:
+            A dictionary containing paginated items and metadata:
+            {'items': List[Dict], 'total_count': int, 'page': int, 'page_size': int}
+        """
+        if not self.redis_client:
+            logger.debug("Analytics query skipped: Redis client not available.")
+            return {'items': [], 'total_count': 0, 'page': page, 'page_size': page_size}
+
+        try:
+            # Find relevant Redis keys based on dates
+            keys = _get_redis_keys_for_range(
+                self.redis_client,
+                user_id=user_id,
+                event_type=event_type,
+                start_date=start_date,
+                end_date=end_date
+            )
+
+            if not keys:
+                return {'items': [], 'total_count': 0, 'page': page, 'page_size': page_size}
+
+            # Scan and filter data from keys
+            all_events = _scan_and_filter_data(
+                self.redis_client,
+                keys,
+                user_id=user_id if not event_type else None, # Filter by user_id only if not already filtered by key
+                event_type=event_type if not user_id else None # Filter by event_type only if not already filtered by key
+            )
+
+            # Apply sorting (descending by timestamp)
+            all_events.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
+
+            # Apply pagination
+            total_count = len(all_events)
+            offset = (page - 1) * page_size
+            paginated_events = all_events[offset : offset + page_size]
+
+            logger.debug("Returning paginated analytics events", total_found=total_count, page=page, page_size=page_size, returned_count=len(paginated_events))
+            return {
+                'items': paginated_events,
+                'total_count': total_count,
+                'page': page,
+                'page_size': page_size
             }
+
+        except redis.exceptions.RedisError as e:
+            logger.error("Redis error retrieving analytics data", error=str(e), exc_info=True)
+            # Return empty paginated structure on error for now
+            return {'items': [], 'total_count': 0, 'page': page, 'page_size': page_size}
+        except Exception as e:
+            logger.error("Unexpected error retrieving analytics data", error=str(e), exc_info=True)
+            return {'items': [], 'total_count': 0, 'page': page, 'page_size': page_size}
+
+    def get_analytics_summary(
+        self,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None
+    ) -> Dict[str, Any]:
+        """Retrieve summary statistics (counters) from Redis."""
+        if not self.redis_client:
+            logger.warning("Cannot get analytics summary: Redis client not available.")
+            return {}
+
+        if end_date is None:
+            end_date = datetime.utcnow()
+        if start_date is None:
+            start_date = end_date - timedelta(days=1)
+
+        summary = {
+            "period_start": start_date.isoformat(),
+            "period_end": end_date.isoformat(),
+            "endpoint_counts": {},
+            "task_counts": {},
+            "total_errors": 0,
+            "total_events_by_type": {}
         }
-        
-        response_times = []
-        
-        # Generate date range
+
+        date_strs = []
+        keys_to_scan_patterns = []
         current_date = start_date
         while current_date <= end_date:
             date_str = current_date.strftime("%Y-%m-%d")
-            
-            # Count API calls
-            api_calls = redis_client.lrange(f"analytics:{AnalyticsEvent.API_CALL}:{date_str}", 0, -1)
-            summary["total_api_calls"] += len(api_calls)
-            
-            # Process API call data
-            for call_data in api_calls:
-                call = json.loads(call_data)
-                
-                # Track endpoints
-                endpoint = call.get("endpoint")
-                if endpoint:
-                    summary["endpoints"][endpoint] = summary["endpoints"].get(endpoint, 0) + 1
-                
-                # Track users
-                user_id = call.get("user_id")
-                if user_id:
-                    summary["total_users"].add(user_id)
-                
-                # Track response times
-                duration = call.get("duration_ms")
-                if duration:
-                    response_times.append(duration)
-            
-            # Count errors
-            errors = redis_client.lrange(f"analytics:errors:{date_str}", 0, -1)
-            summary["errors"] += len(errors)
-            
-            # Count specific event types
-            summary["pdf_processing"] += len(redis_client.lrange(
-                f"analytics:{AnalyticsEvent.PDF_PROCESSING}:{date_str}", 0, -1
-            ))
-            summary["searches"] += len(redis_client.lrange(
-                f"analytics:{AnalyticsEvent.SEARCH}:{date_str}", 0, -1
-            ))
-            summary["questions"] += len(redis_client.lrange(
-                f"analytics:{AnalyticsEvent.QUESTION}:{date_str}", 0, -1
-            ))
-            
+            date_strs.append(date_str)
+            keys_to_scan_patterns.append(f"analytics:counter:*:{date_str}")
+            keys_to_scan_patterns.append(f"analytics:errors:{date_str}")
+            all_event_types = [getattr(AnalyticsEvent, attr) for attr in dir(AnalyticsEvent) 
+                               if not callable(getattr(AnalyticsEvent, attr)) and not attr.startswith("__")]
+            for et in all_event_types:
+                keys_to_scan_patterns.append(f"analytics:{et}:{date_str}")
             current_date += timedelta(days=1)
         
-        # Calculate performance metrics
-        if response_times:
-            summary["performance"]["avg_response_time"] = sum(response_times) / len(response_times)
-            summary["performance"]["max_response_time"] = max(response_times)
-            response_times.sort()
-            p95_index = int(len(response_times) * 0.95)
-            summary["performance"]["p95_response_time"] = response_times[p95_index]
-        
-        # Convert set to count for users
-        summary["total_users"] = len(summary["total_users"])
-        
-        return summary
-    except Exception as e:
-        logger.error(f"Error retrieving analytics summary: {e}")
-        return {}
+        if not keys_to_scan_patterns:
+             return summary
 
-# API Endpoints
+        # Using SCAN can be less efficient than knowing keys, but safer if patterns are complex
+        # Alternative: Generate all expected keys directly as before.
+        keys_to_fetch = []
+        try:
+             for pattern in keys_to_scan_patterns:
+                  # Use scan_iter for memory efficiency if key space is huge
+                  # For moderate number of keys/dates, KEYS might be acceptable but blocks Redis
+                  # Let's stick to generating exact keys if possible, assuming limited types/dates
+                  pass # Revert to generating exact keys below
 
-@app.route('/health', methods=['GET'])
-def health_check():
-    """Health check endpoint"""
-    return jsonify({
-        "status": "healthy", 
-        "service": "analytics-service",
-        "redis_connected": redis_client is not None
-    })
+             keys_to_fetch = [] # Re-initialize
+             for date_str in date_strs:
+                 # Counters
+                 keys_to_fetch.extend(self.redis_client.keys(f"analytics:counter:*:{date_str}")) # Still use KEYS for counters
+                 # Errors list
+                 keys_to_fetch.append(f"analytics:errors:{date_str}")
+                 # Event type lists
+                 all_event_types = [getattr(AnalyticsEvent, attr) for attr in dir(AnalyticsEvent) 
+                                     if not callable(getattr(AnalyticsEvent, attr)) and not attr.startswith("__")]
+                 for et in all_event_types:
+                      keys_to_fetch.append(f"analytics:{et}:{date_str}")
 
-@app.route('/track', methods=['POST'])
-def track_event_endpoint():
-    """Track an analytics event"""
-    try:
-        data = request.json
-        if not data:
-            return jsonify({"error": "No data provided"}), 400
-        
-        event = AnalyticsEvent(
-            event_type=data.get("event_type", AnalyticsEvent.API_CALL),
-            endpoint=data.get("endpoint"),
-            user_id=data.get("user_id"),
-            duration_ms=data.get("duration_ms"),
-            status_code=data.get("status_code"),
-            error=data.get("error"),
-            metadata=data.get("metadata", {})
-        )
-        
-        success = track_event(event)
-        
-        return jsonify({
-            "success": success,
-            "event_id": event.id
-        })
-    except Exception as e:
-        logger.error(f"Error processing track event request: {e}")
-        return jsonify({
-            "error": "Failed to track event",
-            "message": str(e)
-        }), 500
+             if not keys_to_fetch:
+                  logger.debug("No keys found matching patterns for summary")
+                  return summary
 
-@app.route('/events', methods=['GET'])
-def get_events():
-    """Get analytics events"""
-    try:
-        event_type = request.args.get("event_type")
-        user_id = request.args.get("user_id")
-        
-        start_date_str = request.args.get("start_date")
-        end_date_str = request.args.get("end_date")
-        
-        start_date = None
-        if start_date_str:
-            start_date = datetime.fromisoformat(start_date_str)
+             # Filter for keys that actually exist? Optional optimization
+             # existing_keys = [k for k in keys_to_fetch if self.redis_client.exists(k)]
+             existing_keys = keys_to_fetch # Process all potential keys
+
+             counter_keys = [k for k in existing_keys if ':counter:' in k]
+             list_keys = [k for k in existing_keys if ':counter:' not in k]
+
+             pipe = self.redis_client.pipeline(transaction=False) # Use pipeline without transaction for mixed commands
+             if counter_keys:
+                 pipe.mget(counter_keys)
+             if list_keys:
+                 for key in list_keys:
+                     pipe.llen(key)
             
-        end_date = None
-        if end_date_str:
-            end_date = datetime.fromisoformat(end_date_str)
-            
-        limit = int(request.args.get("limit", 100))
-        
-        events = get_analytics(
-            event_type=event_type,
-            user_id=user_id,
-            start_date=start_date,
-            end_date=end_date,
-            limit=limit
-        )
-        
-        return jsonify({
-            "events": events,
-            "count": len(events),
-            "limit": limit
-        })
-    except Exception as e:
-        logger.error(f"Error retrieving events: {e}")
-        return jsonify({
-            "error": "Failed to retrieve events",
-            "message": str(e)
-        }), 500
+             results = pipe.execute()
 
-@app.route('/summary', methods=['GET'])
-def get_summary():
-    """Get analytics summary"""
-    try:
-        start_date_str = request.args.get("start_date")
-        end_date_str = request.args.get("end_date")
-        
-        start_date = None
-        if start_date_str:
-            start_date = datetime.fromisoformat(start_date_str)
-            
-        end_date = None
-        if end_date_str:
-            end_date = datetime.fromisoformat(end_date_str)
-            
-        summary = get_analytics_summary(
-            start_date=start_date,
-            end_date=end_date
-        )
-        
-        return jsonify(summary)
-    except Exception as e:
-        logger.error(f"Error retrieving summary: {e}")
-        return jsonify({
-            "error": "Failed to retrieve summary",
-            "message": str(e)
-        }), 500
+             result_index = 0
+             counter_values = results[result_index] if counter_keys else []
+             if counter_keys: result_index += 1
+             list_lengths = results[result_index:] if list_keys else []
 
-if __name__ == "__main__":
-    app.run(debug=True, host='0.0.0.0', port=int(os.getenv('PORT', 5006))) 
+             # Process counters
+             if counter_keys and counter_values:
+                 for key, value in zip(counter_keys, counter_values):
+                    if value is not None:
+                        try:
+                            count = int(value)
+                            parts = key.split(':')
+                            if len(parts) >= 5:
+                                 counter_type = parts[2]
+                                 name = parts[3]
+                                 if counter_type == 'endpoint':
+                                      summary['endpoint_counts'][name] = summary['endpoint_counts'].get(name, 0) + count
+                                 elif counter_type == 'task':
+                                      summary['task_counts'][name] = summary['task_counts'].get(name, 0) + count
+                        except (ValueError, IndexError) as e:
+                            logger.warning("Failed to parse counter key/value", key=key, value=value, error=str(e))
+            
+             # Process list lengths
+             if list_keys and list_lengths:
+                 for i, key in enumerate(list_keys):
+                      length = list_lengths[i]
+                      if length is None: continue # Handle potential errors from LLEN?
+                      parts = key.split(':')
+                      if len(parts) >= 3:
+                           category = parts[1]
+                           if category == 'errors':
+                                summary['total_errors'] += length
+                           else:
+                                summary['total_events_by_type'][category] = summary['total_events_by_type'].get(category, 0) + length
+                      else:
+                           logger.warning("Unexpected list key format for summary", key=key)
+            
+             return summary
+
+        except redis.exceptions.RedisError as e:
+            logger.error("Redis error retrieving analytics summary", error=str(e), exc_info=True)
+            return summary # Return partial summary
+        except Exception as e:
+            logger.error("Unexpected error retrieving analytics summary", error=str(e), exc_info=True)
+            return summary # Return partial summary
+
+    def get_user_stats_summary(
+        self,
+        user_id: str,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None
+    ) -> Dict[str, Any]:
+        """
+        Calculates and returns summary statistics for a specific user.
+
+        Args:
+            user_id: The ID of the user.
+            start_date: Optional start date for the period.
+            end_date: Optional end date for the period.
+
+        Returns:
+            A dictionary containing user statistics.
+
+        Raises:
+            RedisError: If there's an issue communicating with Redis.
+            Exception: For other unexpected errors during calculation.
+        """
+        logger.debug("Calculating user stats summary", user_id=user_id, start_date=start_date, end_date=end_date)
+        try:
+            # Fetch all relevant events for the user in the period
+            # Use a reasonable limit, or consider if pagination/streaming is needed for huge histories
+            events = self.get_analytics(
+                user_id=user_id,
+                start_date=start_date,
+                end_date=end_date,
+                limit=self.config.get('ANALYTICS_USER_STATS_LIMIT', 5000)
+            )
+
+            # Calculate summary stats from the fetched events
+            pdf_processing_count = len([e for e in events if e.get("event_type") == AnalyticsEvent.PDF_PROCESSING])
+            search_count = len([e for e in events if e.get("event_type") == AnalyticsEvent.SEARCH])
+            question_count = len([e for e in events if e.get("event_type") == AnalyticsEvent.QUESTION])
+            api_call_count = len([e for e in events if e.get("event_type") == AnalyticsEvent.API_CALL]) # Could be useful too
+            total_events = len(events)
+
+            # Calculate average response times (only for API calls with duration)
+            response_times = [
+                e.get("duration_ms")
+                for e in events
+                if e.get("event_type") == AnalyticsEvent.API_CALL and e.get("duration_ms") is not None
+            ]
+            avg_response_time = sum(response_times) / len(response_times) if response_times else 0
+
+            # Get the 10 most recent events for recent activity display
+            # Note: get_analytics currently returns events in an unspecified order (likely insertion order)
+            # If chronological order is needed, sorting might be required here or in get_analytics
+            recent_activity = events[:10]
+
+            summary = {
+                "user_id": user_id,
+                "period": {
+                    "start": start_date.isoformat() if start_date else None,
+                    "end": end_date.isoformat() if end_date else None
+                },
+                "stats": {
+                    "total_events": total_events,
+                    "api_calls": api_call_count,
+                    "pdf_processing": pdf_processing_count,
+                    "searches": search_count,
+                    "questions": question_count,
+                    "avg_response_time_ms": avg_response_time
+                },
+                "recent_activity": recent_activity
+            }
+
+            logger.debug("User stats summary calculated successfully", user_id=user_id, total_events=total_events)
+            return summary
+
+        except redis.exceptions.RedisError as e:
+            logger.error("Redis error calculating user stats summary", user_id=user_id, error=str(e), exc_info=True)
+            # Re-raise Redis specific errors if the caller needs to handle them
+            raise
+        except Exception as e:
+            logger.error("Unexpected error calculating user stats summary", user_id=user_id, error=str(e), exc_info=True)
+            # Re-raise other exceptions
+            raise
+
+# Removed Flask routes (/health, /track, /events, /summary)
+# Removed __main__ block 

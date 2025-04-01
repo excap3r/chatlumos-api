@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS users (
     username VARCHAR(50) UNIQUE NOT NULL,
     email VARCHAR(100) UNIQUE NOT NULL,
     password_hash VARCHAR(128) NOT NULL,
-    password_salt VARCHAR(64) NOT NULL,
+    -- password_salt VARCHAR(64) NOT NULL, -- REMOVED: Unnecessary with bcrypt
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     last_login TIMESTAMP NULL,
@@ -48,21 +48,25 @@ CREATE TABLE IF NOT EXISTS api_keys (
 CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
 CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
 CREATE INDEX IF NOT EXISTS idx_api_keys_user_id ON api_keys(user_id);
-CREATE INDEX IF NOT EXISTS idx_api_keys_key_hash ON api_keys(key_hash);
 CREATE INDEX IF NOT EXISTS idx_user_roles_user_id ON user_roles(user_id);
 CREATE INDEX IF NOT EXISTS idx_user_permissions_user_id ON user_permissions(user_id);
+CREATE INDEX IF NOT EXISTS idx_users_created_at ON users(created_at);
+CREATE INDEX IF NOT EXISTS idx_api_keys_created_at ON api_keys(created_at);
+CREATE INDEX IF NOT EXISTS idx_api_keys_active_expires ON api_keys(is_active, expires_at);
 
 -- Insert default admin user
 -- Default password is 'admin' - THIS SHOULD BE CHANGED IMMEDIATELY IN PRODUCTION
-INSERT INTO users (id, username, email, password_hash, password_salt)
-VALUES (
-    'admin',
-    'admin',
-    'admin@example.com',
-    'c6002ebd59b5a6b5269755f4cc3b2f6deb5bd7e68a9a0b3e3248a1bf738a7887',  -- This is 'admin' with salt 'default_salt'
-    'default_salt'
-) ON DUPLICATE KEY UPDATE id = id;
+-- REMOVED for security
+-- INSERT INTO users (id, username, email, password_hash, password_salt)
+-- VALUES (
+--     'admin', -- Using a predictable UUID string for simplicity in example, generate properly
+--     'admin',
+--     'admin@example.com',
+--     'c6002ebd59b5a6b5269755f4cc3b2f6deb5bd7e68a9a0b3e3248a1bf738a7887',  -- This is 'admin' with salt 'default_salt'
+--     'default_salt'
+-- ) ON DUPLICATE KEY UPDATE id = id; -- Using ON DUPLICATE KEY UPDATE might have unintended consequences, consider alternatives
 
 -- Assign admin role to admin user
-INSERT INTO user_roles (user_id, role)
-VALUES ('admin', 'admin') ON DUPLICATE KEY UPDATE user_id = user_id; 
+-- REMOVED for security
+-- INSERT INTO user_roles (user_id, role)
+-- VALUES ('admin', 'admin') ON DUPLICATE KEY UPDATE user_id = user_id; 
