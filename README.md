@@ -237,6 +237,7 @@ MYSQL_PASSWORD=wisdom_password
 MYSQL_DB=wisdom_db 
 MYSQL_POOL_SIZE=10 
 ```
++*(Note: When using Docker Compose, the `MYSQL_*` variables above are also used to configure the MySQL service container itself.)*
 
 ### Authentication Example (`curl`)
 

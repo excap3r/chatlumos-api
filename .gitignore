@@ -33,3 +33,6 @@ pdfs/
 
 # MkDocs build output
 site/
+
+# IDE specific files
+ide/

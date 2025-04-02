@@ -13,24 +13,19 @@ from functools import wraps # Import wraps
 
 # Import webhook services
 from ..analytics.webhooks.webhook_service import (
-    WebhookSubscription,
-    create_webhook,
-    get_webhook,
-    get_webhooks_by_owner,
-    update_webhook,
-    delete_webhook,
-    trigger_event,
-    # Import exceptions
-    WebhookNotFoundError,
-    WebhookDatabaseError,
-    WebhookDataError,
-    WebhookAuthorizationError,
-    WebhookServiceError,
-    WebhookService
+    WebhookSubscription, # Keep class import
+    # Explicitly ensure no method imports remain
+    WebhookNotFoundError, # Keep Exception
+    WebhookDatabaseError, # Keep Exception
+    WebhookDataError,     # Keep Exception
+    WebhookAuthorizationError, # Keep Exception
+    WebhookServiceError,  # Keep Exception
+    WebhookService        # Keep Service Class
+    # Removed: create_webhook, get_webhook, get_webhooks_by_owner, update_webhook, delete_webhook, trigger_event
 )
 
 # Import authentication utilities
-from ..auth_middleware import auth_required, admin_required
+from .middleware.auth_middleware import require_auth
 
 # Pydantic and Enums for validation
 from pydantic import BaseModel, HttpUrl, Field, ValidationError as PydanticValidationError
@@ -84,7 +79,7 @@ def require_webhook_owner_or_admin(webhook_id_param: str = "webhook_id"):
     """
     def decorator(f):
         @wraps(f)
-        @auth_required() # Ensure user is authenticated first
+        @require_auth() # Ensure user is authenticated first
         def decorated_function(*args, **kwargs):
             webhook_id = kwargs.get(webhook_id_param)
             if not webhook_id:
@@ -117,7 +112,7 @@ def require_webhook_owner_or_admin(webhook_id_param: str = "webhook_id"):
     return decorator
 
 @webhook_bp.route("", methods=["POST"])
-@auth_required()
+@require_auth()
 def create_webhook_subscription():
     """
     Create a new webhook subscription. Validates input using Pydantic.
@@ -160,9 +155,9 @@ def create_webhook_subscription():
         created_subscription_id = create_webhook(subscription)
 
         # Fetch the created subscription to return it (get_webhook raises errors if not found)
-        created_subscription_obj = get_webhook(created_subscription_id)
+        created_subscription_obj = get_webhook_service().get_webhook(created_subscription_id)
 
-        logger.info("Webhook created successfully", user_id=g.user["id"], webhook_id=created_subscription_obj.id, url=created_subscription_obj.url)
+        logger.info("Webhook created successfully", user_id=g.user['id'], webhook_id=created_subscription_obj.id, url=created_subscription_obj.url)
 
         # Return the created subscription object (excluding secret)
         response_data = created_subscription_obj.to_dict()
@@ -181,7 +176,7 @@ def create_webhook_subscription():
         }), 500
 
 @webhook_bp.route("", methods=["GET"])
-@auth_required()
+@require_auth()
 def list_webhooks():
     """
     List webhook subscriptions for the authenticated user.
@@ -332,7 +327,7 @@ def delete_webhook_subscription(webhook_id):
         # The delete_webhook service function likely still needs owner_id for safety/logging
         # but the authorization check is already done.
         # delete_webhook now raises exceptions on failure or returns None on success
-        delete_webhook(webhook_id=g.webhook.id, owner_id=g.user["id"])
+        get_webhook_service().delete_webhook(webhook_id=g.webhook.id, owner_id=g.user["id"])
 
         logger.info("Webhook deleted successfully", user_id=g.user["id"], webhook_id=webhook_id)
         return '', 204
@@ -393,15 +388,18 @@ def test_webhook(webhook_id):
                 "message": "Webhook is disabled, test event not sent."
             }), 200
 
-        # Call the service method to queue the test event task
-        webhook_service.send_test_event(subscription, test_event_payload)
+        # Use the service instance
+        webhook_service = get_webhook_service()
+        # success = webhook_service.send_test_event(g.webhook, test_payload=test_event_payload) # Old call assumes service method existed
+        # Assuming send_test_event is a method on the service instance now:
+        success = webhook_service.send_test_event(g.webhook, test_payload=test_event_payload) # Added service call prefix
 
-        # If service method didn't raise, assume task was queued
-        logger.info("Test event queued for webhook", user_id=g.user["id"], webhook_id=webhook_id)
-        return jsonify({
-            "status": "queued",
-            "message": "Webhook test event queued successfully. Delivery depends on the endpoint responding."
-        }), 202 # 202 Accepted
+        if success:
+            logger.info("Queued test event successfully", user_id=g.user["id"], webhook_id=webhook_id)
+            return jsonify({
+                "status": "queued",
+                "message": "Webhook test event queued successfully. Delivery depends on the endpoint responding."
+            }), 202 # 202 Accepted
 
     except WebhookNotFoundError: # Should be caught by decorator, but handle just in case
         return jsonify({"error": "Webhook not found"}), 404
@@ -416,7 +414,7 @@ def test_webhook(webhook_id):
         }), 500
 
 @webhook_bp.route("/events", methods=["GET"])
-@admin_required
+@require_auth()
 def list_event_types():
     """
     List available event types for webhooks. Admin only.

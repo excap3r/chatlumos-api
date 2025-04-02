@@ -21,24 +21,16 @@ from pydantic import BaseModel, EmailStr, Field, validator, ValidationError as P
 from ..utils.auth_utils import create_token, decode_token, MissingSecretError, InvalidTokenError, ExpiredTokenError
 
 # Import User Service
-from ..user_service import (
-    register_new_user,
-    login_user,
-    add_api_key as service_add_api_key,
-    get_keys_for_user as service_get_keys_for_user,
-    remove_api_key as service_remove_api_key,
-    get_all_users_list as service_get_all_users,
-    update_user_roles_by_id as service_update_user_roles,
-)
+from ..user_service import register_new_user, login_user
 
 # Import specific exceptions used for flow control or specific responses
-from ..db.exceptions import DuplicateUserError, InvalidCredentialsError, UserNotFoundError, DatabaseError
+from ..db.exceptions import UserAlreadyExistsError, InvalidCredentialsError, UserNotFoundError, DatabaseError
 
 # Import middleware
-from .middleware.auth_middleware import auth_required, admin_required
+from .middleware.auth_middleware import require_auth
 
 # Import base error class
-from ..utils.error_utils import APIError, ValidationError
+from ..utils.error_utils import APIError, ValidationError, format_error_response
 
 # Configure logger
 logger = structlog.get_logger(__name__)
@@ -105,27 +97,17 @@ def register():
         logger.info("Registration request validation successful", username=username, email=email)
 
         # Call user service to handle registration (incl. hashing)
-        user_id = register_new_user(
-            username=username,
-            email=email,
-            password=password
-            # Roles default to ['user'] in service
-        )
+        user_id = register_new_user(username, email, password)
 
+        # Optionally create a token upon successful registration
+        token = create_token(user_id=user_id, username=username)
         logger.info("User registered successfully", user_id=user_id, username=username)
-        return jsonify({
-            "message": "User registered successfully",
-            "user_id": user_id
-        }), 201
+        return jsonify({"message": "User registered successfully", "user_id": user_id, "token": token}), 201
 
-    except PydanticValidationError as e:
-        logger.warning("Registration validation failed", errors=e.errors())
-        # Use the custom ValidationError for consistent error responses
-        raise ValidationError(f"Input validation failed: {e.errors()}") # Pass Pydantic errors
-
-    except DuplicateUserError as e:
-        logger.warning("Registration failed: Duplicate user", username=username, email=email)
-        raise APIError(str(e), status_code=409)
+    except UserAlreadyExistsError as e:
+        logger.warning("Registration failed: User already exists", username=username, email=email)
+        response, status_code = format_error_response(e)
+        return jsonify(response), status_code
 
     except DatabaseError as e: # Catch potential DB errors during user creation
         logger.error("Database error during registration", username=username, error=str(e), exc_info=True)
@@ -343,7 +325,7 @@ def refresh_token():
         raise APIError("An unexpected error occurred during token refresh.", status_code=500)
 
 @auth_bp.route("/users", methods=["GET"])
-@admin_required
+@require_auth(roles=['admin'])
 def list_users():
     """
     List all users (admin only).
@@ -366,7 +348,7 @@ def list_users():
         raise APIError("Server error", status_code=500)
 
 @auth_bp.route("/users/<user_id>/roles", methods=["PUT"])
-@admin_required
+@require_auth(roles=['admin'])
 def update_user_roles(user_id):
     """
     Update user roles (admin only).
@@ -431,7 +413,7 @@ def validate():
     # (which would be caught by the global 500 handler)
 
 @auth_bp.route("/keys", methods=["GET"])
-@auth_required
+@require_auth()
 def get_keys():
     """Retrieves all active API keys for the authenticated user."""
     user_id = g.user['id']
@@ -449,7 +431,7 @@ def get_keys():
         raise APIError("An unexpected error occurred while retrieving API keys.", status_code=500)
 
 @auth_bp.route("/keys", methods=["POST"])
-@auth_required
+@require_auth()
 def create_key():
     """Creates a new API key for the authenticated user."""
     user_id = g.user['id']
@@ -481,7 +463,7 @@ def create_key():
         raise APIError("An unexpected error occurred while creating the API key.", status_code=500)
 
 @auth_bp.route("/keys/<key_id>", methods=["DELETE"])
-@auth_required
+@require_auth()
 def delete_key(key_id):
     """Revokes (deletes) an API key belonging to the authenticated user."""
     user_id = g.user['id']

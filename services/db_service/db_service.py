@@ -26,6 +26,8 @@ from services.db.exceptions import QueryError, NotFoundError, DuplicateEntryErro
 
 # Import Models (adjust path if needed)
 from services.db.models.document_models import Document, DocumentChunk, Concept, QAPair, Summary
+# Import DB session handler decorator
+from services.db.db_utils import handle_db_session
 
 # Configure logger
 logger = structlog.get_logger(__name__)
@@ -46,6 +48,7 @@ def _get_session() -> Session:
 
 # --- Document Operations (now regular functions) --- #
 
+@handle_db_session
 def create_document(filename: str, title: str = None, author: str = None, file_path: str = None) -> Optional[int]:
     """
     Creates or updates a document entry using SQLAlchemy ORM with MySQL upsert.
@@ -62,25 +65,17 @@ def create_document(filename: str, title: str = None, author: str = None, file_p
             "status": "processing" # Set initial status
         }
         # Filter out None values for the initial insert part
-        # Note: For ON DUPLICATE KEY UPDATE, we might want different logic
-        # if a field being None should overwrite an existing value.
-        # Let's assume None means "don't update this field".
         values_to_insert = {k: v for k, v in insert_data.items() if v is not None}
         values_to_insert['filename'] = filename # Ensure filename is always included
 
-        # Define the fields to update on duplicate key (filename is unique)
-        # We use the inserted values, but ensure status is reset to 'processing'
-        # and only update fields if the new value is not None.
-        # This requires careful construction based on desired update logic.
-        # Alternative: Just insert and catch IntegrityError, then query and update.
-        # Let's try the upsert approach first.
+        # Define fields to update on duplicate. Use func.values() for MySQL upsert.
         update_data = {}
         if title is not None:
-            update_data["title"] = insert(values_to_insert).inserted.title
+            update_data["title"] = func.values(Document.title)
         if author is not None:
-            update_data["author"] = insert(values_to_insert).inserted.author
+            update_data["author"] = func.values(Document.author)
         if file_path is not None:
-            update_data["file_path"] = insert(values_to_insert).inserted.file_path
+            update_data["file_path"] = func.values(Document.file_path)
         update_data["status"] = "processing" # Always reset status on upsert
         
 
@@ -123,6 +118,7 @@ def create_document(filename: str, title: str = None, author: str = None, file_p
          logger.error("Unexpected error creating/updating document", filename=filename, error=str(e), exc_info=True)
          raise DatabaseError(f"Unexpected error processing document: {e}")
 
+@handle_db_session
 def update_document_status(document_id: int, status: str, total_chunks: Optional[int] = None, full_text: Optional[str] = None) -> bool:
     """Update the status and optionally other fields of a document using ORM."""
     session = _get_session()
@@ -163,6 +159,7 @@ def update_document_status(document_id: int, status: str, total_chunks: Optional
          logger.error("Unexpected error updating document status", document_id=document_id, error=str(e), exc_info=True)
          raise DatabaseError(f"Unexpected error updating document status: {e}")
 
+@handle_db_session
 def create_document_chunk(document_id: int, chunk_index: int, chunk_text: str) -> int:
     """Creates a new document chunk using ORM and returns its ID."""
     session = _get_session()
@@ -212,6 +209,7 @@ def create_document_chunk(document_id: int, chunk_index: int, chunk_text: str) -
         logger.error("Unexpected error creating document chunk", document_id=document_id, error=str(e), exc_info=True)
         raise DatabaseError(f"Unexpected error creating document chunk: {e}")
 
+@handle_db_session
 def update_chunk_status(chunk_id: int, status: str) -> bool:
     """Updates the status of a specific chunk using ORM."""
     session = _get_session()
@@ -242,6 +240,7 @@ def update_chunk_status(chunk_id: int, status: str) -> bool:
          logger.error("Unexpected error updating chunk status", chunk_id=chunk_id, error=str(e), exc_info=True)
          raise DatabaseError(f"Unexpected error updating chunk status: {e}")
 
+@handle_db_session
 def store_concepts(document_id: int, chunk_id: int, concepts: List[Dict[str, str]]) -> bool:
     """Stores multiple concepts for a given chunk using ORM."""
     if not concepts:
@@ -249,38 +248,38 @@ def store_concepts(document_id: int, chunk_id: int, concepts: List[Dict[str, str
         return True # Nothing to store is considered success
 
     session = _get_session()
-    new_concepts_models = []
+    concept_objects = []
     for concept_data in concepts:
-        if 'concept_name' not in concept_data or 'explanation' not in concept_data:
-             logger.warning("Skipping concept due to missing keys", concept_data=concept_data)
-             continue
-        new_concepts_models.append(
-            Concept(
-                document_id=document_id,
-                chunk_id=chunk_id,
-                concept_name=concept_data['concept_name'],
-                explanation=concept_data['explanation']
-                # concept_id is auto-incrementing PK
-            )
-        )
+        concept_text = concept_data.get('concept')
+        explanation = concept_data.get('explanation')
+        if not concept_text or not explanation:
+            logger.warning("Skipping concept due to missing 'concept' or 'explanation'", concept_data=concept_data)
+            continue
+        
+        concept_objects.append(Concept(
+            document_id=document_id,
+            chunk_id=chunk_id,
+            concept=concept_text,
+            explanation=explanation
+        ))
 
-    if not new_concepts_models:
-         logger.warning("No valid concepts found to store after validation", document_id=document_id, chunk_id=chunk_id)
-         return False # Indicate that nothing valid was stored
+    if not concept_objects:
+        logger.debug("No valid concept objects to save after filtering.", document_id=document_id, chunk_id=chunk_id)
+        return True # Still considered success if all inputs were invalid
 
     try:
-        session.add_all(new_concepts_models)
+        session.bulk_save_objects(concept_objects)
         session.commit()
-        logger.info("Concepts stored successfully", document_id=document_id, chunk_id=chunk_id, count=len(new_concepts_models))
+        logger.info(f"Stored {len(concept_objects)} concepts for chunk", document_id=document_id, chunk_id=chunk_id)
         return True
+
     except IntegrityError as e:
         session.rollback()
-        logger.warning("Integrity error storing concepts (invalid document/chunk ID?) ",
+        logger.warning("Integrity error storing concepts (invalid doc/chunk ID?)",
                      document_id=document_id, chunk_id=chunk_id, error_info=str(e.orig))
+        # Determine if it's a foreign key violation
         if "FOREIGN KEY" in str(e.orig).upper():
              raise NotFoundError(f"Document ID {document_id} or Chunk ID {chunk_id} not found.") from e
-        # Add check for duplicate concepts if there's a unique constraint (e.g., on doc_id, chunk_id, concept_name)
-        # elif "Duplicate entry" in str(e.orig): ...
         else:
              raise QueryError(f"Database integrity error storing concepts: {e}") from e
     except SQLAlchemyError as e:
@@ -289,48 +288,49 @@ def store_concepts(document_id: int, chunk_id: int, concepts: List[Dict[str, str
         raise QueryError(f"Failed to store concepts: {e}")
     except Exception as e:
         session.rollback()
-        logger.error("Unexpected error storing concepts", document_id=document_id, chunk_id=chunk_id, error=str(e), exc_info=True)
+        logger.error("Unexpected error storing concepts", document_id=document_id, error=str(e), exc_info=True)
         raise DatabaseError(f"Unexpected error storing concepts: {e}")
 
+@handle_db_session
 def store_qa_pairs(document_id: int, chunk_id: int, qa_pairs: List[Dict[str, str]]) -> bool:
-    """Stores multiple QA pairs for a given chunk using ORM."""
+    """Stores multiple question-answer pairs for a given chunk using ORM."""
     if not qa_pairs:
         logger.debug("No QA pairs provided to store", document_id=document_id, chunk_id=chunk_id)
         return True # Nothing to store is considered success
 
     session = _get_session()
-    new_qa_models = []
+    qa_objects = []
     for qa_data in qa_pairs:
-        if 'question' not in qa_data or 'answer' not in qa_data:
-             logger.warning("Skipping QA pair due to missing keys", qa_data=qa_data)
-             continue
-        new_qa_models.append(
-            QAPair(
-                document_id=document_id,
-                chunk_id=chunk_id,
-                question=qa_data['question'],
-                answer=qa_data['answer']
-                # qa_id is auto-incrementing PK
-            )
-        )
+        question = qa_data.get('question')
+        answer = qa_data.get('answer')
+        if not question or not answer:
+            logger.warning("Skipping QA pair due to missing 'question' or 'answer'", qa_data=qa_data)
+            continue
+        
+        qa_objects.append(QAPair(
+            document_id=document_id,
+            chunk_id=chunk_id,
+            question=question,
+            answer=answer
+        ))
 
-    if not new_qa_models:
-         logger.warning("No valid QA pairs found to store after validation", document_id=document_id, chunk_id=chunk_id)
-         return False # Indicate that nothing valid was stored
+    if not qa_objects:
+        logger.debug("No valid QA pair objects to save after filtering.", document_id=document_id, chunk_id=chunk_id)
+        return True
 
     try:
-        session.add_all(new_qa_models)
+        session.bulk_save_objects(qa_objects)
         session.commit()
-        logger.info("QA pairs stored successfully", document_id=document_id, chunk_id=chunk_id, count=len(new_qa_models))
+        logger.info(f"Stored {len(qa_objects)} QA pairs for chunk", document_id=document_id, chunk_id=chunk_id)
         return True
+
     except IntegrityError as e:
         session.rollback()
-        logger.warning("Integrity error storing QA pairs (invalid document/chunk ID?) ",
+        logger.warning("Integrity error storing QA pairs (invalid doc/chunk ID?)",
                      document_id=document_id, chunk_id=chunk_id, error_info=str(e.orig))
+        # Determine if it's a foreign key violation
         if "FOREIGN KEY" in str(e.orig).upper():
              raise NotFoundError(f"Document ID {document_id} or Chunk ID {chunk_id} not found.") from e
-        # Add check for duplicate QA pairs if relevant constraints exist
-        # elif "Duplicate entry" in str(e.orig): ...
         else:
              raise QueryError(f"Database integrity error storing QA pairs: {e}") from e
     except SQLAlchemyError as e:
@@ -339,9 +339,10 @@ def store_qa_pairs(document_id: int, chunk_id: int, qa_pairs: List[Dict[str, str
         raise QueryError(f"Failed to store QA pairs: {e}")
     except Exception as e:
         session.rollback()
-        logger.error("Unexpected error storing QA pairs", document_id=document_id, chunk_id=chunk_id, error=str(e), exc_info=True)
+        logger.error("Unexpected error storing QA pairs", document_id=document_id, error=str(e), exc_info=True)
         raise DatabaseError(f"Unexpected error storing QA pairs: {e}")
 
+@handle_db_session
 def store_summary(document_id: int, summary_text: str) -> bool:
     """Stores a summary for a given document using ORM."""
     session = _get_session()
@@ -392,6 +393,7 @@ def store_summary(document_id: int, summary_text: str) -> bool:
         logger.error("Unexpected error storing summary", document_id=document_id, error=str(e), exc_info=True)
         raise DatabaseError(f"Unexpected error storing summary: {e}")
 
+@handle_db_session
 def get_all_concepts(document_id: Optional[int] = None) -> List[Dict[str, Any]]:
     """Retrieves all concepts, optionally filtered by document ID, using ORM."""
     session = _get_session()
@@ -426,6 +428,7 @@ def get_all_concepts(document_id: Optional[int] = None) -> List[Dict[str, Any]]:
          logger.error("Unexpected error retrieving concepts", document_id=document_id, error=str(e), exc_info=True)
          raise DatabaseError(f"Unexpected error retrieving concepts: {e}")
 
+@handle_db_session
 def get_all_qa_pairs(document_id: Optional[int] = None) -> List[Dict[str, Any]]:
     """Retrieves all QA pairs, optionally filtered by document ID, using ORM."""
     session = _get_session()
@@ -458,6 +461,7 @@ def get_all_qa_pairs(document_id: Optional[int] = None) -> List[Dict[str, Any]]:
          logger.error("Unexpected error retrieving QA pairs", document_id=document_id, error=str(e), exc_info=True)
          raise DatabaseError(f"Unexpected error retrieving QA pairs: {e}")
 
+@handle_db_session
 def get_document_summary(document_id: int) -> Optional[str]:
     """Retrieves the latest summary text for a given document ID using ORM."""
     session = _get_session()
@@ -482,6 +486,7 @@ def get_document_summary(document_id: int) -> Optional[str]:
          logger.error("Unexpected error retrieving summary", document_id=document_id, error=str(e), exc_info=True)
          raise DatabaseError(f"Unexpected error retrieving summary: {e}")
 
+@handle_db_session
 def get_document_info(document_id: int) -> Dict[str, Any]:
     """Retrieves comprehensive information for a document using ORM."""
     session: Session = _get_session()
@@ -545,6 +550,7 @@ def get_document_info(document_id: int) -> Dict[str, Any]:
         logger.error("Unexpected error retrieving document info", document_id=document_id, error=str(e), exc_info=True)
         raise DatabaseError(f"Unexpected error retrieving document info: {e}")
 
+@handle_db_session
 def get_document_chunks(document_id: int) -> List[Dict[str, Any]]:
     """Retrieves all chunks for a given document ID, ordered by index."""
     session = _get_session()
@@ -576,6 +582,7 @@ def get_document_chunks(document_id: int) -> List[Dict[str, Any]]:
         logger.error("Unexpected error retrieving document chunks", document_id=document_id, error=str(e), exc_info=True)
         raise DatabaseError(f"Unexpected error retrieving document chunks: {e}")
 
+@handle_db_session
 def get_document_statistics() -> Dict[str, Any]:
     """Retrieves various statistics about documents, chunks, and generated content using ORM."""
     session = _get_session()
@@ -626,6 +633,7 @@ def get_document_statistics() -> Dict[str, Any]:
         logger.error("Unexpected error retrieving document statistics", error=str(e), exc_info=True)
         raise DatabaseError(f"Unexpected error retrieving document statistics: {e}")
 
+@handle_db_session
 def get_all_documents() -> List[Dict]:
     # ... (Existing code) ...
     pass # Placeholder

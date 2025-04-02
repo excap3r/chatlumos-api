@@ -19,6 +19,8 @@ from typing import Dict, List, Any, Optional, Callable
 from flask import current_app # Keep current_app
 import redis
 import structlog
+# Import SSRF filter
+# from ssrf_filter import validate as validate_url_ssrf, FilterError
 
 # Import the new Celery task
 from services.tasks.webhook_tasks import send_webhook_task
@@ -35,6 +37,10 @@ DEFAULT_WEBHOOK_USER_AGENT = "PDFWisdomExtractor-Webhook/1.0"
 # --- Custom Exceptions ---
 class WebhookServiceError(Exception):
     """Base class for webhook service errors."""
+    pass
+
+class InvalidWebhookURLError(WebhookServiceError):
+    """Webhook URL is invalid or disallowed."""
     pass
 
 class WebhookNotFoundError(WebhookServiceError):
@@ -54,6 +60,62 @@ class WebhookAuthorizationError(WebhookServiceError):
     pass
 
 # --- End Custom Exceptions ---
+
+# --- Added imports for new URL validation ---
+import socket
+import ipaddress
+from urllib.parse import urlparse
+# --- End added imports ---
+
+# --- Start New URL Validation Function ---
+def _validate_webhook_url(url: str):
+    """
+    Validates a webhook URL to prevent SSRF attacks.
+    Checks if the hostname resolves to a private, loopback, or unspecified IP address.
+    Raises InvalidWebhookURLError if validation fails.
+    """
+    try:
+        parsed_url = urlparse(url)
+        hostname = parsed_url.hostname
+
+        if not hostname:
+            raise InvalidWebhookURLError(f"Invalid URL: Could not parse hostname from '{url}'")
+
+        # Resolve hostname to IP addresses (supports IPv4 and IPv6)
+        # Use socket.getaddrinfo for robust resolution
+        addr_info = socket.getaddrinfo(hostname, parsed_url.port or (443 if parsed_url.scheme == 'https' else 80))
+        
+        if not addr_info:
+             raise InvalidWebhookURLError(f"Could not resolve hostname: '{hostname}'")
+
+        for family, socktype, proto, canonname, sockaddr in addr_info:
+            ip_addr_str = sockaddr[0]
+            try:
+                ip_obj = ipaddress.ip_address(ip_addr_str)
+                # Check if the IP address is private, loopback, link-local, or unspecified
+                if ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local or ip_obj.is_unspecified:
+                    logger.warning("Webhook URL resolved to non-public IP", url=url, hostname=hostname, resolved_ip=ip_addr_str)
+                    raise InvalidWebhookURLError(
+                        f"Webhook URL hostname '{hostname}' resolves to a disallowed IP address: {ip_addr_str}"
+                    )
+                logger.debug("Webhook URL resolved to allowed public IP", url=url, hostname=hostname, resolved_ip=ip_addr_str)
+            except ValueError:
+                # Should not happen if getaddrinfo returns valid IPs, but handle anyway
+                logger.error("Error parsing IP address returned by getaddrinfo", ip_str=ip_addr_str)
+                raise InvalidWebhookURLError(f"Error validating IP address {ip_addr_str} for hostname '{hostname}'")
+
+        logger.info("Webhook URL validation successful", url=url, hostname=hostname)
+
+    except socket.gaierror as e:
+        logger.warning("Webhook URL hostname resolution failed", url=url, hostname=hostname, error=str(e))
+        raise InvalidWebhookURLError(f"Could not resolve hostname '{hostname}': {e}") from e
+    except InvalidWebhookURLError: # Re-raise specific errors
+        raise
+    except Exception as e:
+        # Catch other potential errors (parsing, etc.)
+        logger.error("Unexpected error during webhook URL validation", url=url, error=str(e), exc_info=True)
+        raise InvalidWebhookURLError(f"An unexpected error occurred validating URL '{url}': {e}") from e
+# --- End New URL Validation Function ---
 
 class WebhookSubscription:
     """Webhook subscription data structure"""
@@ -139,32 +201,26 @@ class WebhookSubscription:
 class WebhookService:
     """Service class for managing and triggering webhooks."""
 
-    def __init__(self, config: Dict[str, Any]):
-        """Initialize the WebhookService."""
+    def __init__(self, config: Dict[str, Any], redis_client: Optional[redis.Redis]):
+        """Initialize the WebhookService with an injected Redis client."""
         self.config = config
-        self.redis_client: Optional[redis.Redis] = None
+        self.redis_client = redis_client
         self.webhook_ttl = self.config.get('WEBHOOK_TTL_SECONDS', DEFAULT_WEBHOOK_TTL)
         self.max_retries = self.config.get('WEBHOOK_MAX_RETRIES', DEFAULT_MAX_RETRY_COUNT)
         self.timeout = self.config.get('WEBHOOK_TIMEOUT_SECONDS', DEFAULT_WEBHOOK_TIMEOUT)
         self.user_agent = self.config.get('WEBHOOK_USER_AGENT', DEFAULT_WEBHOOK_USER_AGENT)
 
-        # Get Redis client instance from current_app
-        try:
-            if hasattr(current_app, 'redis_client') and current_app.redis_client:
-                self.redis_client = current_app.redis_client
-                if self.redis_client.ping():
-                    logger.info("WebhookService connected to Redis successfully.")
-                else:
-                    logger.warning("WebhookService: Redis client found but ping failed. Webhooks disabled.")
-                    self.redis_client = None
-            else:
-                logger.warning("WebhookService: Redis client not found on current_app. Webhooks disabled.")
-        except RuntimeError:
-            logger.error("WebhookService init error: Not in a Flask application context.")
-        except redis.exceptions.ConnectionError as e:
-            logger.error("WebhookService init error: Redis connection failed.", error=str(e))
-        except Exception as e:
-            logger.error("WebhookService init error: Unexpected error getting Redis client.", error=str(e), exc_info=True)
+        # Log status based on the injected client
+        if self.redis_client:
+             try:
+                 if self.redis_client.ping():
+                      logger.info("WebhookService initialized with active Redis client.")
+                 else:
+                      logger.warning("WebhookService initialized, but injected Redis client failed ping. Webhooks may fail.")
+             except redis.exceptions.RedisError as e:
+                  logger.error("WebhookService: Error pinging injected Redis client during init.", error=str(e))
+        else:
+             logger.warning("WebhookService initialized without a Redis client. Webhooks disabled.")
 
     def create_webhook(self, subscription: WebhookSubscription) -> Optional[str]:
         """
@@ -176,12 +232,27 @@ class WebhookService:
         Raises:
             WebhookDatabaseError: If a Redis error occurs.
             WebhookServiceError: For other unexpected errors.
+            InvalidWebhookURLError: If the webhook URL fails SSRF validation.
         """
         if not self.redis_client:
             logger.error("Cannot create webhook: Redis client not available.")
             raise WebhookDatabaseError("Redis client not available.")
 
         try:
+            # >> Replace URL Validation here <<
+            try:
+                # validate_url_ssrf(subscription.url) # Old validation
+                _validate_webhook_url(subscription.url) # New validation
+                logger.debug("Webhook URL passed SSRF validation.", url=subscription.url)
+            # except FilterError as e: # Old exception
+            except InvalidWebhookURLError as e: # Catch specific validation error
+                logger.warning("Webhook URL failed validation", url=subscription.url, error=str(e))
+                raise e # Re-raise the specific error
+            except Exception as e: # Catch other potential validation errors
+                logger.error("Unexpected error during URL validation", url=subscription.url, error=str(e), exc_info=True)
+                # Wrap in our specific error type
+                raise InvalidWebhookURLError(f"Unexpected error validating URL '{subscription.url}': {e}") from e
+
             key = f"webhook:subscription:{subscription.id}"
             owner_key = f"webhook:owner:{subscription.owner_id}"
             pipe = self.redis_client.pipeline()
@@ -325,6 +396,7 @@ class WebhookService:
             WebhookDataError: If validation/decoding fails.
             WebhookDatabaseError: On Redis errors.
             WebhookServiceError: For other unexpected errors.
+            InvalidWebhookURLError: If the new URL fails SSRF validation.
         """
         if not self.redis_client:
             logger.error("Cannot update webhook: Redis client not available.")
@@ -356,9 +428,21 @@ class WebhookService:
                         types_to_remove = set()
 
                         if 'url' in updates and updates['url'] != subscription.url:
-                            if not isinstance(updates['url'], str) or not updates['url'].startswith(('http://', 'https://')):
+                            new_url = updates['url']
+                            if not isinstance(new_url, str) or not new_url.startswith(('http://', 'https://')):
                                  raise ValueError("Invalid new webhook URL provided.")
-                            subscription.url = updates['url']
+                            # >> Validate the new URL <<
+                            try:
+                                # validate_url_ssrf(new_url) # Old validation
+                                _validate_webhook_url(new_url) # New validation
+                            except InvalidWebhookURLError as e:
+                                logger.warning("New webhook URL failed validation during update", url=new_url, error=str(e))
+                                raise e # Re-raise
+                            except Exception as e:
+                                logger.error("Unexpected error during new URL validation in update", url=new_url, error=str(e), exc_info=True)
+                                raise InvalidWebhookURLError(f"Unexpected error validating new URL '{new_url}': {e}") from e
+                            # Validation passed
+                            subscription.url = new_url
                             updated = True
                         if 'description' in updates and updates['description'] != subscription.description:
                             subscription.description = updates['description']

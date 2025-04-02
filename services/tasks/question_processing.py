@@ -7,13 +7,13 @@ import redis
 from dotenv import load_dotenv
 import traceback
 import structlog
+from typing import Any
 
 # Import the Celery app instance
-from ....celery_app import celery_app # Adjusted relative import
+from celery_app import celery_app # Corrected: Import from root
 from services.config import AppConfig # Added
-from services.llm_service import LLMService
-from services.vector_search import VectorSearchService
-from services.utils.error_utils import ServiceError # Use shared error type
+from services.llm_service.llm_service import LLMService # Corrected import path
+from services.vector_search.vector_search import VectorSearchService # Corrected import path
 
 # Load env vars at module level for worker
 load_dotenv()

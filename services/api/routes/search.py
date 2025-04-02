@@ -6,6 +6,8 @@ from services.analytics.analytics_middleware import track_specific_event
 from services.analytics.analytics_service import AnalyticsEvent
 from services.utils.error_utils import APIError, ValidationError, ServiceError
 from services.config import AppConfig
+# Import auth decorator
+from services.api.middleware.auth_middleware import require_auth
 
 search_bp = Blueprint('search', __name__)
 
@@ -15,6 +17,7 @@ search_bp = Blueprint('search', __name__)
 
 @search_bp.route('/search', methods=['POST'])
 @rate_limit(lambda: current_app.redis_client, max_calls=60, per_seconds=60)
+@require_auth() # Add authentication check
 @cache_result(lambda: current_app.redis_client, ttl=3600)
 @track_specific_event(AnalyticsEvent.SEARCH)
 def search_route():

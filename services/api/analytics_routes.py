@@ -16,14 +16,12 @@ import redis
 
 # Import analytics services
 from ..analytics.analytics_service import (
-    get_analytics,
-    get_analytics_summary,
     AnalyticsEvent,
     AnalyticsService
 )
 
 # Import authentication utilities
-from ..auth_middleware import auth_required, admin_required
+from .middleware.auth_middleware import require_auth
 
 # Import request helpers
 from .utils.request_helpers import parse_date_range_args, generate_csv_string
@@ -38,7 +36,7 @@ logger = structlog.get_logger(__name__)
 analytics_bp = Blueprint("analytics", __name__)
 
 @analytics_bp.route("/dashboard", methods=["GET"])
-@auth_required()
+@require_auth(roles=['admin'])
 def dashboard():
     """
     Get analytics dashboard summary data.
@@ -57,11 +55,9 @@ def dashboard():
         # Parse date parameters using helper
         start_date, end_date = parse_date_range_args(request.args)
 
-        # Get analytics summary
-        summary = get_analytics_summary(
-            start_date=start_date,
-            end_date=end_date
-        )
+        # Get analytics service instance and call function
+        analytics_service = get_analytics_service()
+        summary = analytics_service.get_analytics_summary(start_date, end_date)
         
         return jsonify(summary)
     except ValidationError as e:
@@ -76,7 +72,7 @@ def dashboard():
         }), 500
 
 @analytics_bp.route("/events", methods=["GET"])
-@admin_required
+@require_auth(roles=['admin'])
 def events():
     """
     Get detailed analytics events. Admin only.
@@ -124,7 +120,6 @@ def events():
                      start_date=start_date, end_date=end_date) # Fixed parenthesis
         
         # Get events
-        # Get analytics service instance and call function
         analytics_service = get_analytics_service()
         paginated_result = analytics_service.get_analytics(
             event_type=event_type,
@@ -145,17 +140,18 @@ def events():
         logger.error("Error retrieving analytics events via API", error=str(e), exc_info=True)
         return jsonify({"error": "Internal server error retrieving analytics"}), 500
 
-# Use the service instance from the app context
-# Assuming it's stored like current_app.analytics_service
+# Helper to get service instance
 def get_analytics_service() -> AnalyticsService:
-    if not hasattr(current_app, 'analytics_service'):
-        logger.error("AnalyticsService not initialized or attached to current_app")
-        # This indicates a setup problem, raise a configuration error or similar
-        raise RuntimeError("AnalyticsService is not available.")
-    return current_app.analytics_service
+    """Helper function to get the analytics service instance from the current app context."""
+    service = current_app.analytics_service
+    if not service:
+         # This shouldn't happen if app setup is correct, but good to check
+         logger.error("AnalyticsService not initialized or found on current_app")
+         raise RuntimeError("Analytics service is unavailable.")
+    return service
 
 @analytics_bp.route("/user-stats", methods=["GET"])
-@auth_required() # Ensures g.user is set
+@require_auth(roles=['admin'])
 def user_stats():
     """
     Get analytics summary statistics for the currently authenticated user.
@@ -201,7 +197,7 @@ def user_stats():
         }), 500
 
 @analytics_bp.route("/export", methods=["GET"])
-@admin_required
+@require_auth(roles=['admin'])
 def export_analytics():
     """
     Export analytics data. Admin only.
@@ -232,12 +228,14 @@ def export_analytics():
         
         # Get events with configured limit for export
         export_limit = current_app.config.get('ANALYTICS_EXPORT_LIMIT', 10000)
-        events = get_analytics(
+        analytics_service = get_analytics_service()
+        events = analytics_service.get_analytics(
             event_type=event_type,
             start_date=start_date,
             end_date=end_date,
-            limit=export_limit
-        )
+            page=1, # Fetch all up to the limit
+            page_size=export_limit
+        )['items'] # Extract items from the paginated result
         
         # Format response based on requested format
         if export_format == "csv":

@@ -57,4 +57,11 @@ celery[redis]==5.3.6 # Pinned version
 # Documentation Generation
 mkdocs
 mkdocstrings
-mkdocstrings-python 
+mkdocstrings-python
+
+# Added for webhook SSRF protection
+ssrf-filter
+
+# Added for async event loop optimization
+uvloop
+uvicorn 

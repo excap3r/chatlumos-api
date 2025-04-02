@@ -258,36 +258,45 @@ def generate_api_key(prefix: str = "sk") -> str:
 
 def hash_api_key(api_key: str) -> str:
     """
-    Generate a secure hash of an API key for storage using bcrypt.
-    Note: Bcrypt is generally for passwords, but can be used here. SHA-256 might also be suitable.
-          Using bcrypt makes verification consistent with passwords.
+    Generate a secure bcrypt hash of an API key for storage.
+    Includes automatically generated salt.
 
     Args:
-        api_key: API key to hash.
+        api_key: The plain text API key.
 
     Returns:
-        Hashed API key string.
+        bcrypt hash string of the API key.
     """
-    hashed_key = bcrypt.hashpw(api_key.encode('utf-8'), bcrypt.gensalt())
-    logger.debug("API key hashed using bcrypt")
+    api_key_bytes = api_key.encode('utf-8')
+    # Generate salt and hash the key
+    hashed_key = bcrypt.hashpw(api_key_bytes, bcrypt.gensalt())
+    logger.debug("API Key hashed successfully using bcrypt")
+    # Return as string for database storage
     return hashed_key.decode('utf-8')
 
 
 def verify_api_key_hash(api_key: str, stored_hash: str) -> bool:
     """
-    Verify an API key against its stored bcrypt hash.
+    Verify a plain text API key against a stored bcrypt hash.
 
     Args:
-        api_key: The plain text API key.
-        stored_hash: The stored bcrypt hash of the key.
+        api_key: The plain text API key to verify.
+        stored_hash: The stored bcrypt hash to compare against.
 
     Returns:
         True if the key matches the hash, False otherwise.
     """
+    api_key_bytes = api_key.encode('utf-8')
+    stored_hash_bytes = stored_hash.encode('utf-8')
+
     try:
-        return bcrypt.checkpw(api_key.encode('utf-8'), stored_hash.encode('utf-8'))
-    except ValueError:
-        logger.warning("Attempted to verify API key against an invalid hash format")
+        # bcrypt.checkpw handles salt extraction and comparison
+        is_valid = bcrypt.checkpw(api_key_bytes, stored_hash_bytes)
+        logger.debug("API Key verification result (bcrypt)", is_valid=is_valid)
+        return is_valid
+    except ValueError as e:
+        # Handle cases where the stored_hash is not a valid bcrypt hash format
+        logger.warning("Attempted to verify API key against an invalid hash format", error=str(e))
         return False
     except Exception as e:
         logger.error("Unexpected error during API key hash verification", error=str(e), exc_info=True)

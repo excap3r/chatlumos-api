@@ -32,7 +32,8 @@ celery_app = Celery(
     include=[
         'services.tasks.question_processing', 
         'services.tasks.pdf_processing',
-        'services.tasks.webhook_tasks' # Added webhook task module
+        'services.tasks.webhook_tasks', # Added webhook task module
+        'services.tasks.analytics_tasks' # Added analytics task module
     ] # List of modules to import when the worker starts
 )
 

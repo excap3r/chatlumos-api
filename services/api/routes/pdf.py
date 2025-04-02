@@ -21,6 +21,7 @@ from services.utils.api_helpers import allowed_file, handle_error # Removed unus
 from services.utils.log_utils import log_request_start, log_request_end
 from services.decorators import rate_limit # Adjusted relative import
 from services.config import AppConfig # Added for REDIS_TASK_TTL
+from services.utils.error_utils import APIError, ValidationError
 
 pdf_bp = Blueprint('pdf', __name__)
 
@@ -114,6 +115,7 @@ def upload_pdf():
         'filename': filename,
         'started_at': datetime.utcnow().isoformat(),
         'updated_at': datetime.utcnow().isoformat(),
+        'user_id': user_id,
         'result': None,
         'error': None
     }

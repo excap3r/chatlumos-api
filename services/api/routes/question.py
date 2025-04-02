@@ -8,6 +8,8 @@ from services.analytics.analytics_service import AnalyticsEvent
 from services.analytics.analytics_middleware import track_specific_event
 from services.utils.api_helpers import rate_limit, cache_result
 from services.utils.error_utils import APIError, ValidationError # Added
+# Import auth decorator
+from services.api.middleware.auth_middleware import require_auth
 
 # Define the Blueprint
 question_bp = Blueprint('question_bp', __name__)
@@ -19,6 +21,7 @@ DEFAULT_MODEL = "all-MiniLM-L6-v2"
 
 @question_bp.route('/question', methods=['POST'])
 @rate_limit(lambda: current_app.redis_client, max_calls=30, per_seconds=60) # Use current_app
+@require_auth() # Add authentication check
 @cache_result(lambda: current_app.redis_client, ttl=3600) # Use current_app
 @track_specific_event(AnalyticsEvent.QUESTION)
 def question():

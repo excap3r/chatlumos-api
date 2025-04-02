@@ -24,11 +24,10 @@ from .db.user_db import (
 
 # Import database exceptions
 from .db.exceptions import (
-    UserAlreadyExistsError, # Should be DuplicateUserError based on auth_routes?
+    UserAlreadyExistsError,
     InvalidCredentialsError,
     UserNotFoundError,
-    DatabaseError,
-    DuplicateUserError # Confirm this is the correct one raised by create_user
+    DatabaseError
 )
 
 # Import utility functions
@@ -51,7 +50,7 @@ def register_new_user(username: str, email: str, password: str, roles: Optional[
         The ID of the newly created user.
 
     Raises:
-        DuplicateUserError: If the username or email already exists.
+        UserAlreadyExistsError: If the username or email already exists.
         DatabaseError: For other database-related issues.
         Exception: For unexpected errors during hashing or creation.
     """
@@ -76,12 +75,12 @@ def register_new_user(username: str, email: str, password: str, roles: Optional[
         )
         logger.info("User created successfully via service layer", user_id=user_id, username=username)
         return user_id
-    except DuplicateUserError as e: # Assuming db_create_user raises this
+    except UserAlreadyExistsError as e:
         logger.warning("User registration failed: Duplicate user (service layer)", username=username, email=email)
-        raise e # Re-raise the specific error
+        raise e
     except DatabaseError as e:
         logger.error("Database error during user creation (service layer)", username=username, error=str(e), exc_info=True)
-        raise e # Re-raise the specific error
+        raise e
     except Exception as e:
         logger.error("Unexpected error during user creation (service layer)", username=username, error=str(e), exc_info=True)
         raise Exception("An unexpected error occurred while creating the user.") from e

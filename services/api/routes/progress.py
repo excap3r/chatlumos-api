@@ -1,11 +1,13 @@
 import json
 import time
-from flask import Blueprint, jsonify, Response, stream_with_context, current_app
+from flask import Blueprint, jsonify, Response, stream_with_context, current_app, g
 from datetime import datetime, timedelta
 
 # Import utility
 from services.utils.error_utils import APIError
 from services.config import AppConfig
+# Import auth decorator
+from services.api.middleware.auth_middleware import require_auth
 
 progress_bp = Blueprint('progress_bp', __name__)
 
@@ -14,6 +16,7 @@ progress_bp = Blueprint('progress_bp', __name__)
 # PUBSUB_LISTEN_TIMEOUT = 1.0 # Timeout for pubsub.listen() in seconds
 
 @progress_bp.route('/progress/<task_id>', methods=['GET'])
+@require_auth() # Add authentication check
 def stream_progress(task_id):
     """Streams progress updates for a given task ID using Redis Pub/Sub and SSE."""
     redis_client = current_app.redis_client
@@ -39,6 +42,19 @@ def stream_progress(task_id):
                 if redis_client.exists(redis_key):
                     task_data_bytes = redis_client.hgetall(redis_key)
                     task_data = {k.decode('utf-8'): v.decode('utf-8') for k, v in task_data_bytes.items()}
+                    
+                    # --- Authorization Check --- #
+                    task_user_id = task_data.get('user_id')
+                    authenticated_user_id = g.user.get('id')
+                    # Check if the authenticated user owns the task
+                    # TODO: Add admin check here if admins should bypass this (e.g., if 'admin' in g.user.get('roles', []))
+                    if task_user_id != authenticated_user_id:
+                        logger.warning(f"Authorization failed for task progress stream", 
+                                         task_id=task_id, task_owner=task_user_id, 
+                                         requesting_user=authenticated_user_id)
+                        yield f"event: error\ndata: {json.dumps({'error': 'Forbidden', 'message': 'You do not have permission to view this task progress.'})}\n\n"
+                        return # End the generator immediately
+                    # --- End Authorization Check --- #
                     
                     # Prepare and send initial state
                     if 'result' in task_data and task_data['result']:

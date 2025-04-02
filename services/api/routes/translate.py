@@ -7,6 +7,8 @@ from services.utils.api_helpers import rate_limit, cache_result
 from services.analytics.analytics_middleware import track_specific_event
 from services.analytics.analytics_service import AnalyticsEvent
 from services.utils.error_utils import APIError, ValidationError
+# Import auth decorator
+from services.api.middleware.auth_middleware import require_auth
 
 translate_bp = Blueprint('translate', __name__)
 
@@ -51,6 +53,7 @@ def translate_text_internal(text, target_lang="en", source_lang="auto"):
 
 @translate_bp.route('/translate', methods=['POST'])
 @rate_limit(lambda: current_app.redis_client, max_calls=30, per_seconds=60)
+@require_auth() # Add authentication check
 @cache_result(lambda: current_app.redis_client, ttl=86400)  # Cache for 24 hours
 @track_specific_event(AnalyticsEvent.API_CALL)
 def translate_route():

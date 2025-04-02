@@ -9,11 +9,16 @@ from datetime import datetime
 from celery import Task
 from typing import Dict, Any, Optional
 
-# Import Celery app, config, subscription definition, and Redis client helper
-from ....celery_app import celery_app
+# Import the Celery app instance
+from celery_app import celery_app
 from services.config import AppConfig
-from services.analytics.webhooks.webhook_service import WebhookSubscription # Adjust if path changes
-from .question_processing import get_redis_client # Reuse Redis client helper
+
+# Added for type checking imports
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # Import only for type checking to avoid circular dependency
+    from services.analytics.webhooks.webhook_service import WebhookSubscription
 
 logger = structlog.get_logger(__name__)
 

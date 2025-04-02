@@ -15,8 +15,16 @@ from typing import Dict, List, Any, Optional, Tuple
 from flask import Flask, request, jsonify, g, current_app # Keep g for track_api_call
 import redis
 
-# Configure logger
+# Configure logger *before* potential import errors use it
 logger = structlog.get_logger(__name__)
+
+# Import the new Celery task
+try:
+    from services.tasks.analytics_tasks import log_analytics_event_task
+except ImportError:
+    # Handle case where task might not be importable (e.g., during setup)
+    log_analytics_event_task = None
+    logger.warning("Could not import log_analytics_event_task. Analytics tracking might be disabled or synchronous.")
 
 # Constants
 DEFAULT_ANALYTICS_TTL = 60 * 60 * 24 * 30  # 30 days
@@ -91,37 +99,52 @@ class AnalyticsEvent:
 class AnalyticsService:
     """Service class for managing analytics events using Redis."""
 
-    def __init__(self, config: Dict[str, Any], db_pool: Optional[Any] = None):
-        """Initialize the AnalyticsService."""
+    def __init__(self, config: Dict[str, Any], redis_client: Optional[redis.Redis], db_pool: Optional[Any] = None):
+        """Initialize the AnalyticsService with an injected Redis client."""
         self.config = config
         # db_pool is passed but not used here currently, store if needed later
         self.db_pool = db_pool
-        self.redis_client: Optional[redis.Redis] = None
+        # Directly assign the injected client
+        self.redis_client = redis_client
         self.analytics_ttl = self.config.get('ANALYTICS_TTL_SECONDS', DEFAULT_ANALYTICS_TTL)
 
-        # Get Redis client instance from the application context/config
-        # Assumes app.py stores the initialized client on the app object
-        try:
-            # Check both potential locations for flexibility during transition
-            if hasattr(current_app, 'redis_client') and current_app.redis_client:
-                self.redis_client = current_app.redis_client
-            elif 'REDIS_CLIENT' in current_app.config and current_app.config['REDIS_CLIENT']:
-                 self.redis_client = current_app.config['REDIS_CLIENT']
+        # Remove the old logic trying to get client from current_app
+        # try:
+        #     # Check both potential locations for flexibility during transition
+        #     if hasattr(current_app, 'redis_client') and current_app.redis_client:
+        #         self.redis_client = current_app.redis_client
+        #     elif 'REDIS_CLIENT' in current_app.config and current_app.config['REDIS_CLIENT']:
+        #          self.redis_client = current_app.config['REDIS_CLIENT']
+        #
+        #     if self.redis_client and self.redis_client.ping():
+        #         logger.info("AnalyticsService connected to Redis successfully.")
+        #     elif self.redis_client:
+        #         logger.warning("Redis client found in config, but ping failed. Analytics disabled.")
+        #         self.redis_client = None
+        # except RuntimeError:
+        #     logger.error("AnalyticsService init error: Not in a Flask application context during init?")
+        #     self.redis_client = None
+        # except redis.exceptions.ConnectionError as e:
+        #     logger.error("AnalyticsService init error: Redis connection failed.", error=str(e))
+        #     self.redis_client = None
+        # except Exception as e:
+        #     logger.error("AnalyticsService init error: Unexpected error getting Redis client.", error=str(e), exc_info=True)
+        #     self.redis_client = None
 
-            if self.redis_client and self.redis_client.ping():
-                logger.info("AnalyticsService connected to Redis successfully.")
-            elif self.redis_client:
-                logger.warning("Redis client found in config, but ping failed. Analytics disabled.")
-                self.redis_client = None
-        except RuntimeError:
-            logger.error("AnalyticsService init error: Not in a Flask application context during init?")
-            self.redis_client = None
-        except redis.exceptions.ConnectionError as e:
-            logger.error("AnalyticsService init error: Redis connection failed.", error=str(e))
-            self.redis_client = None
-        except Exception as e:
-            logger.error("AnalyticsService init error: Unexpected error getting Redis client.", error=str(e), exc_info=True)
-            self.redis_client = None
+        # Log status based on the injected client
+        if self.redis_client:
+             try:
+                 if self.redis_client.ping():
+                      logger.info("AnalyticsService initialized with active Redis client.")
+                 else:
+                      # This case is less likely if app.py already pinged, but possible
+                      logger.warning("AnalyticsService initialized, but injected Redis client failed ping. Analytics may fail.")
+                      # Keep the client instance, let operations fail naturally
+             except redis.exceptions.RedisError as e:
+                  logger.error("AnalyticsService: Error pinging injected Redis client during init.", error=str(e))
+                  # Keep the client instance
+        else:
+             logger.warning("AnalyticsService initialized without a Redis client. Analytics disabled.")
 
     def track_event(self, event: AnalyticsEvent) -> bool:
         """
@@ -131,50 +154,23 @@ class AnalyticsService:
             logger.debug("Analytics tracking skipped: Redis client not available.", event_type=event.event_type)
             return False
 
-        try:
-            event_dict = event.to_dict()
-            event_json = json.dumps(event_dict)
+        # --- Asynchronous Tracking via Celery --- #
+        if log_analytics_event_task:
             try:
-                event_dt = datetime.fromisoformat(event.timestamp.replace('Z', '+00:00'))
-                date_str = event_dt.strftime("%Y-%m-%d")
-            except ValueError:
-                date_str = datetime.utcnow().strftime("%Y-%m-%d")
-                logger.warning("Could not parse event timestamp, using current date for key", event_timestamp=event.timestamp)
-
-            pipe = self.redis_client.pipeline()
-            key = f"analytics:{event.event_type}:{date_str}"
-            pipe.lpush(key, event_json)
-            pipe.expire(key, self.analytics_ttl)
-
-            if event.user_id:
-                user_key = f"analytics:user:{event.user_id}:{date_str}"
-                pipe.lpush(user_key, event_json)
-                pipe.expire(user_key, self.analytics_ttl)
-
-            if event.endpoint:
-                endpoint_key = f"analytics:counter:endpoint:{event.endpoint}:{date_str}"
-                pipe.incr(endpoint_key)
-                pipe.expire(endpoint_key, self.analytics_ttl)
-            
-            if event.task_name:
-                task_key = f"analytics:counter:task:{event.task_name}:{date_str}"
-                pipe.incr(task_key)
-                pipe.expire(task_key, self.analytics_ttl)
-
-            if event.error:
-                error_key = f"analytics:errors:{date_str}"
-                pipe.lpush(error_key, event_json)
-                pipe.expire(error_key, self.analytics_ttl)
-
-            results = pipe.execute()
-            logger.debug("Analytics event tracked via Redis pipeline", event_id=event.id, event_type=event.event_type)
-            return True
-        except redis.exceptions.RedisError as e:
-            logger.error("Redis error tracking analytics event", event_id=event.id, error=str(e), exc_info=True)
+                event_dict = event.to_dict()
+                log_analytics_event_task.delay(event_dict)
+                logger.debug("Analytics event enqueued via Celery task", event_id=event.id, event_type=event.event_type)
+                return True
+            except Exception as e:
+                # Log error and potentially fall back to synchronous, or just fail
+                logger.error("Failed to enqueue analytics event task", event_id=event.id, error=str(e), exc_info=True)
+                # Fallback to synchronous? Or just return False?
+                # For now, let's just return False to indicate failure to track.
+                return False
+        else:
+            logger.warning("log_analytics_event_task not available. Analytics tracking skipped.", event_id=event.id)
             return False
-        except Exception as e:
-            logger.error("Unexpected error tracking analytics event", event_id=event.id, error=str(e), exc_info=True)
-            return False
+        # --- End Asynchronous Tracking --- #
 
     def track_api_call(self, response, start_time: float) -> None:
         """
@@ -230,7 +226,11 @@ class AnalyticsService:
                 status=status,
                 error=error_message
             )
-            self.track_event(event) # Call the class method
+            # Use self.track_event which is now asynchronous
+            result = self.track_event(event)
+            if not result:
+                # Log if enqueuing failed (track_event now returns bool)
+                logger.warning("Failed to track API call event asynchronously", event_id=event.id)
             
         except RuntimeError as e:
              # Catch errors accessing request/g outside of context (shouldn't happen in after_request)

@@ -47,6 +47,13 @@ class InvalidCredentialsError(APIError):
     def __init__(self, message: str = "Invalid username or password", details: any = None):
         super().__init__(message, status_code=401, details=details)
 
+# --- General Data Integrity Exceptions ---
+
+class DuplicateEntryError(APIError):
+    """A unique constraint violation occurred (409 Conflict)."""
+    def __init__(self, message: str = "Duplicate entry detected", details: any = None):
+        super().__init__(message, status_code=409, details=details)
+
 # --- API key related exceptions --- 
 
 class ApiKeyError(APIError):

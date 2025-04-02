@@ -70,4 +70,43 @@ def configured_celery_app():
     """Returns the configured Celery app instance."""
     return celery_app
 
+# --- Authentication Mocking Fixture --- #
+@pytest.fixture
+def mock_auth_user(mocker, app):
+    """Fixture factory to mock flask.g.user for authenticated routes."""
+    
+    def _mock_user(user_id="test-user-123", roles=None, permissions=None, auth_method="JWT"):
+        """Mocks flask.g.user with specified details."""
+        if roles is None:
+            roles = ["user"]
+        if permissions is None:
+            permissions = []
+            
+        mock_user_data = {
+            'id': user_id,
+            'username': f"user_{user_id}", # Generate a username
+            'roles': roles,
+            'permissions': permissions,
+            'auth_type': auth_method
+            # Add other fields if the auth middleware/decorators expect them
+        }
+        
+        # Patch flask.g within the app context for the duration of the test
+        # This requires the test to run within the app context, which fixtures like `client` provide.
+        # We patch 'flask.g' which is the typical way to access it.
+        # Using mocker.patch ensures it's automatically cleaned up.
+        patcher = mocker.patch('flask.g', return_value=mocker.MagicMock())
+        g_mock = patcher.start()
+        g_mock.user = mock_user_data
+        g_mock.auth_method = auth_method
+        
+        # Store the patcher to stop it later (pytest might handle this automatically with mocker, but explicit is safer)
+        # If not using mocker fixture, would need to manually call patcher.stop()
+        # pytest.addfinalizer(patcher.stop) # Let pytest handle cleanup if mocker isn't used explicitly
+        
+        return g_mock # Return the mocked g object if needed, or just rely on side effect
+
+    return _mock_user # Return the inner function so tests can call it with params
+
+
 # Add other shared fixtures below as needed, e.g., mock services 

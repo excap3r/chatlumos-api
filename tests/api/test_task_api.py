@@ -6,12 +6,13 @@ from flask import Flask, g, jsonify
 from functools import wraps # Needed for mock decorator
 
 # Assuming client fixture and app fixture are available from conftest.py
+# Assuming mock_auth_user fixture is available from conftest.py
 
 # --- Mock Celery Task ---
 # Create a mock object that mimics the Celery task object
 # We need to be able to mock the .delay() method
 @patch('celery_app.celery_app.send_task') # Assuming celery app instance is accessible this way
-def test_ask_endpoint_success(mock_send_task, client, app):
+def test_ask_endpoint_success(mock_send_task, client, app, mock_auth_user):
     """Test successful submission to /api/ask endpoint."""
     mock_user_id = str(uuid.uuid4())
     question_text = "What is the summary?"
@@ -25,23 +26,13 @@ def test_ask_endpoint_success(mock_send_task, client, app):
     mock_redis = MagicMock()
     app.redis_client = mock_redis # Inject mock redis into app
 
-    # Mock the authentication decorator (assuming it sets g.user)
-    with patch('services.api.middleware.auth_middleware.require_auth') as mock_require_auth:
-        # Simulate the decorator setting g.user
-        def mock_decorator(f):
-            @wraps(f)
-            def decorated_function(*args, **kwargs):
-                g.user = {'id': mock_user_id}
-                return f(*args, **kwargs)
-            return decorated_function
-        mock_require_auth.side_effect = mock_decorator
-
-        # Make the request within the app context if needed for g
-        with app.test_request_context():
-             response = client.post('/api/ask', json={
-                 'question': question_text,
-                 'pdf_id': pdf_id
-             })
+    # Use the mock_auth_user fixture
+    with app.test_request_context(): # Ensure app context for g
+        mock_auth_user(user_id=mock_user_id)
+        response = client.post('/api/ask', json={
+            'question': question_text,
+            'pdf_id': pdf_id
+        })
 
     assert response.status_code == 202
     assert response.json['task_id'] == expected_task_id
@@ -72,19 +63,12 @@ def test_ask_endpoint_unauthenticated(client):
     })
     assert response.status_code == 401
 
-@patch('services.api.middleware.auth_middleware.require_auth')
-def test_ask_endpoint_bad_input(mock_require_auth, client, app):
+def test_ask_endpoint_bad_input(client, app, mock_auth_user):
     """Test /api/ask fails with missing input fields."""
     mock_user_id = str(uuid.uuid4())
     
-    # Mock auth decorator
-    def mock_decorator(f):
-        @wraps(f)
-        def decorated_function(*args, **kwargs):
-            g.user = {'id': mock_user_id}
-            return f(*args, **kwargs)
-        return decorated_function
-    mock_require_auth.side_effect = mock_decorator
+    # Use the mock_auth_user fixture
+    mock_auth_user(user_id=mock_user_id)
     
     with app.test_request_context():
         # Missing pdf_id
@@ -106,7 +90,7 @@ def test_ask_endpoint_bad_input(mock_require_auth, client, app):
 
 # Assuming process_pdf_task is in services.tasks.pdf_processing
 @patch('celery_app.celery_app.send_task') 
-def test_pdf_upload_success(mock_send_task, client, app):
+def test_pdf_upload_success(mock_send_task, client, app, mock_auth_user):
     """Test successful PDF upload and task creation."""
     mock_user_id = str(uuid.uuid4())
     expected_task_id = str(uuid.uuid4())
@@ -120,25 +104,16 @@ def test_pdf_upload_success(mock_send_task, client, app):
     mock_redis = MagicMock()
     app.redis_client = mock_redis
 
-    # Mock auth decorator
-    with patch('services.api.middleware.auth_middleware.require_auth') as mock_require_auth:
-        def mock_decorator(f):
-            @wraps(f)
-            def decorated_function(*args, **kwargs):
-                g.user = {'id': mock_user_id}
-                return f(*args, **kwargs)
-            return decorated_function
-        mock_require_auth.side_effect = mock_decorator
-
-        # Simulate file upload using test_client
-        # Need BytesIO to simulate file object
-        from io import BytesIO
-        data = {
-            'file': (BytesIO(file_content), file_name)
-        }
-        
-        with app.test_request_context():
-            response = client.post('/api/pdf', data=data, content_type='multipart/form-data')
+    # Simulate file upload using test_client
+    from io import BytesIO
+    data = {
+        'file': (BytesIO(file_content), file_name)
+    }
+    
+    with app.test_request_context():
+        # Use the mock_auth_user fixture
+        mock_auth_user(user_id=mock_user_id)
+        response = client.post('/api/pdf', data=data, content_type='multipart/form-data')
 
     assert response.status_code == 202
     assert response.json['task_id'] == expected_task_id
@@ -175,42 +150,26 @@ def test_pdf_upload_unauthenticated(client):
     response = client.post('/api/pdf', data=data, content_type='multipart/form-data')
     assert response.status_code == 401
 
-@patch('services.api.middleware.auth_middleware.require_auth')
-def test_pdf_upload_no_file(mock_require_auth, client, app):
+def test_pdf_upload_no_file(client, app, mock_auth_user):
     """Test /api/pdf fails when no file is provided."""
     mock_user_id = str(uuid.uuid4())
-    # Mock auth decorator
-    def mock_decorator(f):
-        @wraps(f)
-        def decorated_function(*args, **kwargs):
-            g.user = {'id': mock_user_id}
-            return f(*args, **kwargs)
-        return decorated_function
-    mock_require_auth.side_effect = mock_decorator
-
+    
     with app.test_request_context():
+        mock_auth_user(user_id=mock_user_id)
         response = client.post('/api/pdf', data={}, content_type='multipart/form-data')
     
     assert response.status_code == 400
     assert 'No file part' in response.json['error'] # Adjust expected message
 
-@patch('services.api.middleware.auth_middleware.require_auth')
-def test_pdf_upload_no_filename(mock_require_auth, client, app):
+def test_pdf_upload_no_filename(client, app, mock_auth_user):
     """Test /api/pdf fails when file has no filename."""
     mock_user_id = str(uuid.uuid4())
-    # Mock auth decorator
-    def mock_decorator(f):
-        @wraps(f)
-        def decorated_function(*args, **kwargs):
-            g.user = {'id': mock_user_id}
-            return f(*args, **kwargs)
-        return decorated_function
-    mock_require_auth.side_effect = mock_decorator
-
+    
     from io import BytesIO
     data = {'file': (BytesIO(b"test"), '')} # Empty filename
     
     with app.test_request_context():
+        mock_auth_user(user_id=mock_user_id)
         response = client.post('/api/pdf', data=data, content_type='multipart/form-data')
     
     assert response.status_code == 400
@@ -221,9 +180,8 @@ def test_pdf_upload_no_filename(mock_require_auth, client, app):
 
 # Note: Testing SSE requires careful handling of the streaming response
 
-@patch('services.api.middleware.auth_middleware.require_auth')
 @patch('redis.Redis.pubsub') # Mock the pubsub method of the Redis client
-def test_progress_endpoint_sse_success(mock_redis_pubsub, mock_require_auth, client, app):
+def test_progress_endpoint_sse_success(mock_redis_pubsub, client, app, mock_auth_user):
     """Test the progress SSE endpoint successfully streams updates."""
     mock_user_id = str(uuid.uuid4())
     task_id = str(uuid.uuid4())
@@ -252,17 +210,10 @@ def test_progress_endpoint_sse_success(mock_redis_pubsub, mock_require_auth, cli
     mock_ps.close = MagicMock()
     mock_redis_pubsub.return_value = mock_ps
 
-    # Mock auth decorator
-    def mock_decorator(f):
-        @wraps(f)
-        def decorated_function(*args, **kwargs):
-            g.user = {'id': mock_user_id} # Assuming progress route checks user auth
-            return f(*args, **kwargs)
-        return decorated_function
-    mock_require_auth.side_effect = mock_decorator
-
-    # Make the request - use stream=True
-    response = client.get(f'/api/progress/{task_id}', headers={'Accept': 'text/event-stream'})
+    # Use the mock_auth_user fixture
+    with app.test_request_context():
+        mock_auth_user(user_id=mock_user_id)
+        response = client.get(f'/api/progress/{task_id}', headers={'Accept': 'text/event-stream'})
     
     assert response.status_code == 200
     assert response.mimetype == 'text/event-stream'

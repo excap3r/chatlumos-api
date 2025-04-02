@@ -16,6 +16,9 @@ import uuid
 import bcrypt
 import structlog # Added
 from flask import current_app # Added
+import redis
+import hashlib
+import json
 
 # Import SQLAlchemy components
 from sqlalchemy.orm import Session # Add Session import
@@ -28,13 +31,45 @@ from .models.user_models import User, UserRoleAssociation, APIKey # Import User,
 
 # Import utilities
 # from ..utils.auth_utils import hash_password, hash_api_key, verify_password # Assuming these might be deprecated if bcrypt is used directly
+from ..utils.auth_utils import verify_api_key_hash
 from .exceptions import (
     DatabaseError, ConnectionError, QueryError, 
-    UserNotFoundError, UserAlreadyExistsError, InvalidCredentialsError, DuplicateUserError, APIKeyNotFoundError
+    UserNotFoundError, UserAlreadyExistsError, InvalidCredentialsError, ApiKeyNotFoundError
 )
+# Import DB session handler decorator
+from .db_utils import handle_db_session
 
 # Configure logger
 logger = structlog.get_logger(__name__) # Changed
+
+# --- Redis Client Helper --- #
+# (Assumes redis client is initialized and stored on current_app, e.g., current_app.redis_client)
+def _get_redis_client() -> Optional[redis.Redis]:
+    """Gets the Redis client from Flask's current_app."""
+    try:
+        client = getattr(current_app, 'redis_client', None)
+        if client and client.ping(): # Check connection
+            return client
+        elif client:
+            logger.warning("Redis client found but ping failed in user_db.")
+            return None
+        else:
+            logger.warning("Redis client not found on current_app in user_db.")
+            return None
+    except RuntimeError:
+        logger.error("Cannot access current_app outside of application context in user_db.")
+        return None
+    except redis.exceptions.ConnectionError as e:
+        logger.error(f"Redis connection error in user_db: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error getting Redis client in user_db: {e}", exc_info=True)
+        return None
+
+# --- Cache Constants --- #
+API_KEY_CACHE_PREFIX = "apikey_verify_cache:"
+API_KEY_CACHE_TTL = 60 # Cache results for 60 seconds
+API_KEY_CACHE_INVALID_MARKER = "__INVALID__"
 
 # Removed global pool variable and setter
 # user_db_pool: Optional[pooling.MySQLConnectionPool] = None
@@ -60,6 +95,7 @@ def _get_session() -> Session:
 
 # User Operations
 
+@handle_db_session
 def create_user(
     username: str,
     email: str,
@@ -82,65 +118,44 @@ def create_user(
         # id, created_at, updated_at, is_active have defaults in the model
     )
 
-    try:
-        session.add(new_user)
-        # Flush to get the new_user.id before adding roles
-        session.flush()
+    session.add(new_user)
+    # Flush to get the new_user.id before adding roles
+    session.flush()
 
-        # Assign roles using the association class
-        if roles:
-            for role_name in roles:
-                # Check if role already exists can be added here if needed
-                user_role = UserRoleAssociation(user_id=new_user.id, role=role_name)
-                session.add(user_role)
+    # Assign roles using the association class
+    if roles:
+        for role_name in roles:
+            # Check if role already exists can be added here if needed
+            user_role = UserRoleAssociation(user_id=new_user.id, role=role_name)
+            session.add(user_role)
 
-        session.commit()
-        logger.info("User created and committed successfully", user_id=str(new_user.id), username=username)
-        
-        # Construct the return dictionary matching the previous format as closely as possible
-        # We have the basic user info, roles were handled. Need to fetch created_at etc.?
-        # Refreshing loads the defaults like created_at
-        session.refresh(new_user)
-        # Fetching roles explicitly for the return dictionary if `viewonly=True` is used
-        # Or just return the input roles list for simplicity now.
-        
-        # Get roles from the association table after commit/refresh
-        committed_roles = session.query(UserRoleAssociation.role).filter_by(user_id=new_user.id).all()
-        role_list = [role[0] for role in committed_roles]
+    session.commit()
+    logger.info("User created and committed successfully", user_id=str(new_user.id), username=username)
+    
+    # Construct the return dictionary matching the previous format as closely as possible
+    # We have the basic user info, roles were handled. Need to fetch created_at etc.?
+    # Refreshing loads the defaults like created_at
+    session.refresh(new_user)
+    # Fetching roles explicitly for the return dictionary if `viewonly=True` is used
+    # Or just return the input roles list for simplicity now.
+    
+    # Get roles from the association table after commit/refresh
+    committed_roles = session.query(UserRoleAssociation.role).filter_by(user_id=new_user.id).all()
+    role_list = [role[0] for role in committed_roles]
 
-        return {
-            "id": str(new_user.id), # Convert UUID to string
-            "username": new_user.username,
-            "email": new_user.email,
-            "is_active": new_user.is_active,
-            "created_at": new_user.created_at, # Already datetime
-            "updated_at": new_user.updated_at, # Already datetime
-            "last_login": new_user.last_login, # Already datetime or None
-            "roles": role_list, # Use the roles we added
-            "permissions": [] # Permissions not handled in create_user, return empty list
-        }
+    return {
+        "id": str(new_user.id), # Convert UUID to string
+        "username": new_user.username,
+        "email": new_user.email,
+        "is_active": new_user.is_active,
+        "created_at": new_user.created_at, # Already datetime
+        "updated_at": new_user.updated_at, # Already datetime
+        "last_login": new_user.last_login, # Already datetime or None
+        "roles": role_list, # Use the roles we added
+        "permissions": [] # Permissions not handled in create_user, return empty list
+    }
 
-    except IntegrityError as e:
-        session.rollback()
-        logger.warning("Failed to create user due to integrity error (likely duplicate username/email)", username=username, email=email, error=str(e))
-        # Check if it's specifically a duplicate key error
-        # The exact error message/code might vary by DB backend
-        # For MySQL with unique constraints, this is a common way
-        # if "Duplicate entry" in str(e.orig):
-        raise DuplicateUserError(f"Username '{username}' or email '{email}' already exists")
-        # else:
-        #    raise QueryError(f"Database integrity error: {e}")
-
-    except SQLAlchemyError as e:
-        session.rollback()
-        logger.error("Database error creating user", username=username, email=email, error=str(e), exc_info=True)
-        raise QueryError(f"Failed to create user: {e}")
-
-    except Exception as e:
-        session.rollback()
-        logger.error("Unexpected error creating user", username=username, email=email, error=str(e), exc_info=True)
-        raise DatabaseError(f"An unexpected error occurred: {e}")
-
+@handle_db_session
 def authenticate_user(username: str, password: str) -> Dict[str, Any]:
     """
     Authenticate a user with username and password using SQLAlchemy ORM and bcrypt.
@@ -148,134 +163,111 @@ def authenticate_user(username: str, password: str) -> Dict[str, Any]:
     session = _get_session()
     user_id_for_auth = None # Keep for logging consistency
 
+    # Query user by username using ORM
+    user = session.query(User).filter(User.username == username).first()
+
+    if not user:
+        logger.warning("Authentication failed: User not found", username=username)
+        raise InvalidCredentialsError()
+
+    user_id_for_auth = user.id # Store UUID for logging
+
+    # Verify password using bcrypt against the stored hash
+    stored_hash_bytes = user.password_hash.encode('utf-8')
+    if not bcrypt.checkpw(password.encode('utf-8'), stored_hash_bytes):
+        logger.warning("Authentication failed: Incorrect password", username=username, user_id=str(user_id_for_auth))
+        raise InvalidCredentialsError()
+
+    # Check if user is active
+    if not user.is_active:
+        logger.warning("Authentication failed: User account inactive", username=username, user_id=str(user_id_for_auth))
+        raise InvalidCredentialsError("User account is not active")
+
+    # --- Update last login time (Keep inner try/except for this specific commit) ---
     try:
-        # Query user by username using ORM
-        user = session.query(User).filter(User.username == username).first()
+        user.last_login = datetime.utcnow() # Use UTC time now
+        session.commit() # Commit this specific change
+        logger.debug("Updated last_login for user", user_id=str(user_id_for_auth))
+    except SQLAlchemyError as update_err:
+        session.rollback() # Rollback only the failed last_login update attempt
+        # Log failure but don't fail the overall authentication
+        logger.warning("Failed to update last_login time after successful authentication",
+                         user_id=str(user_id_for_auth), error=str(update_err))
+        # User object might be in detached state, refresh if needed for subsequent reads
+        # session.refresh(user) # Or re-query
 
-        if not user:
-            logger.warning("Authentication failed: User not found", username=username)
-            raise InvalidCredentialsError()
+    # --- Get full user info (roles/permissions) ---
+    # Construct the return dictionary directly from the user object
+    # Query roles explicitly as the relationship might be viewonly or lazy
+    # If session.refresh was called above, this query is fine.
+    # If not, and last_login failed, user object might be stale.
+    # Let's assume for now the user object state is acceptable or refresh was done.
+    committed_roles = session.query(UserRoleAssociation.role).filter_by(user_id=user.id).all()
+    role_list = [role[0] for role in committed_roles]
 
-        user_id_for_auth = user.id # Store UUID for logging
+    # Permissions are not managed via this table directly in the model, return empty
+    permission_list = []
 
-        # Verify password using bcrypt against the stored hash
-        stored_hash_bytes = user.password_hash.encode('utf-8')
-        if not bcrypt.checkpw(password.encode('utf-8'), stored_hash_bytes):
-            logger.warning("Authentication failed: Incorrect password", username=username, user_id=str(user_id_for_auth))
-            raise InvalidCredentialsError()
+    user_info = {
+        "id": str(user.id),
+        "username": user.username,
+        "email": user.email,
+        "is_active": user.is_active,
+        "created_at": user.created_at,
+        "updated_at": user.updated_at,
+        "last_login": user.last_login, # Reflects the updated time (or original if update failed)
+        "roles": role_list,
+        "permissions": permission_list
+    }
 
-        # Check if user is active
-        if not user.is_active:
-            logger.warning("Authentication failed: User account inactive", username=username, user_id=str(user_id_for_auth))
-            raise InvalidCredentialsError("User account is not active")
+    logger.info("User authenticated successfully", username=username, user_id=str(user_id_for_auth))
+    return user_info
 
-        # --- Update last login time ---
-        try:
-            user.last_login = datetime.utcnow() # Use UTC time now
-            session.commit() # Commit this specific change
-            logger.debug("Updated last_login for user", user_id=str(user_id_for_auth))
-        except SQLAlchemyError as update_err:
-             session.rollback() # Rollback only the failed last_login update attempt
-             # Log failure but don't fail the overall authentication
-             logger.warning("Failed to update last_login time after successful authentication",
-                              user_id=str(user_id_for_auth), error=str(update_err))
-             # Fetch the user again or refresh if needed, as the session might be in a weird state
-             # For simplicity, we'll proceed assuming the main user object is still usable
-             # Alternatively, re-fetch user = session.query(User).get(user_id_for_auth)
-
-        # --- Get full user info (roles/permissions) ---
-        # Construct the return dictionary directly from the user object
-        # Query roles explicitly as the relationship might be viewonly or lazy
-        committed_roles = session.query(UserRoleAssociation.role).filter_by(user_id=user.id).all()
-        role_list = [role[0] for role in committed_roles]
-
-        # Permissions are not managed via this table directly in the model, return empty
-        permission_list = []
-
-        user_info = {
-            "id": str(user.id),
-            "username": user.username,
-            "email": user.email,
-            "is_active": user.is_active,
-            "created_at": user.created_at,
-            "updated_at": user.updated_at,
-            "last_login": user.last_login, # Reflects the updated time (or original if update failed)
-            "roles": role_list,
-            "permissions": permission_list
-        }
-
-        logger.info("User authenticated successfully", username=username, user_id=str(user_id_for_auth))
-        return user_info
-
-    except InvalidCredentialsError: # Re-raise specific auth errors
-        # No rollback needed here as no changes were committed before the error
-        raise
-    except SQLAlchemyError as e:
-        session.rollback() # Rollback any potential changes (e.g., failed last_login)
-        logger.error("Database error during authentication", username=username, user_id=str(user_id_for_auth) if user_id_for_auth else None, error=str(e), exc_info=True)
-        raise QueryError(f"Database error during authentication: {e}")
-    except Exception as e:
-         # Catch unexpected errors
-         session.rollback()
-         logger.error("Unexpected error during authentication", username=username, user_id=str(user_id_for_auth) if user_id_for_auth else None, error=str(e), exc_info=True)
-         raise DatabaseError(f"An unexpected error occurred during authentication: {e}")
-
+@handle_db_session
 def get_user_by_id(user_id: str) -> Dict[str, Any]:
     """
     Get user information by ID using SQLAlchemy ORM, including roles.
     """
     session = _get_session()
+    # Convert user_id string to UUID if necessary (model uses UUID type)
     try:
-        # Convert user_id string to UUID if necessary (model uses UUID type)
-        try:
-            user_uuid = uuid.UUID(user_id)
-        except ValueError:
-            logger.warning("Invalid UUID format provided for get_user_by_id", user_id=user_id)
-            raise UserNotFoundError(f"Invalid user ID format: {user_id}")
+        user_uuid = uuid.UUID(user_id)
+    except ValueError:
+        logger.warning("Invalid UUID format provided for get_user_by_id", user_id=user_id)
+        raise UserNotFoundError(f"Invalid user ID format: {user_id}")
 
-        # Query user by ID
-        user = session.query(User).filter(User.id == user_uuid).first()
+    # Query user by ID
+    # Eager load roles using joinedload or selectinload
+    user = session.query(User).options(selectinload(User.roles)).filter(User.id == user_uuid).first()
 
-        if not user:
-            logger.warning("User not found by ID", user_id=user_id)
-            raise UserNotFoundError(f"User with ID {user_id} not found")
+    if not user:
+        logger.warning("User not found by ID", user_id=user_id)
+        raise UserNotFoundError(f"User with ID {user_id} not found")
 
-        # Query roles explicitly
-        committed_roles = session.query(UserRoleAssociation.role).filter_by(user_id=user.id).all()
-        role_list = [role[0] for role in committed_roles]
+    # Extract roles from the loaded relationship
+    role_list = [assoc.role for assoc in user.roles]
 
-        # Permissions not handled here yet
-        permission_list = []
+    # Permissions not handled here yet
+    permission_list = []
 
-        # Construct dictionary
-        user_info = {
-            "id": str(user.id),
-            "username": user.username,
-            "email": user.email,
-            "is_active": user.is_active,
-            "created_at": user.created_at,
-            "updated_at": user.updated_at,
-            "last_login": user.last_login,
-            "roles": role_list,
-            "permissions": permission_list
-        }
-
-        logger.debug("User retrieved by ID", user_id=user_id, username=user.username)
-        return user_info
-
-    except UserNotFoundError:
-        raise # Re-raise specific error
-    except SQLAlchemyError as e:
-        # Don't rollback reads
-        logger.error("Database error retrieving user by ID", user_id=user_id, error=str(e), exc_info=True)
-        raise QueryError(f"Failed to get user by ID: {e}")
-    except Exception as e:
-         logger.error("Unexpected error retrieving user by ID", user_id=user_id, error=str(e), exc_info=True)
-         raise DatabaseError(f"An unexpected error occurred retrieving user by ID: {e}")
+    # Construct dictionary
+    user_info = {
+        "id": str(user.id),
+        "username": user.username,
+        "email": user.email,
+        "is_active": user.is_active,
+        "created_at": user.created_at,
+        "updated_at": user.updated_at,
+        "last_login": user.last_login,
+        "roles": role_list,
+        "permissions": permission_list
+    }
+    return user_info
 
 # Define fields allowed for update via this generic function
 ALLOWED_UPDATE_FIELDS = {'username', 'email', 'is_active'}
 
+@handle_db_session
 def update_user(
     user_id: str,
     data: Dict[str, Any]
@@ -333,7 +325,7 @@ def update_user(
     except IntegrityError as e:
         session.rollback()
         logger.warning("Update failed due to integrity error (likely duplicate username/email)", user_id=user_id, error=str(e))
-        raise DuplicateUserError(f"Update failed: New username or email might already exist.")
+        raise UserAlreadyExistsError(f"Update failed: New username or email might already exist.")
     except SQLAlchemyError as e:
         session.rollback()
         logger.error("Database error updating user", user_id=user_id, error=str(e), exc_info=True)
@@ -438,6 +430,7 @@ def update_user_password(user_id: str, new_password: str) -> bool:
 
 # API Key Operations
 
+@handle_db_session
 def create_api_key(user_id: str, name: str, expires_at: Optional[datetime] = None) -> Dict[str, Any]:
     """
     Create a new API key for a user.
@@ -483,104 +476,163 @@ def create_api_key(user_id: str, name: str, expires_at: Optional[datetime] = Non
         'is_active': True
     }
 
+@handle_db_session
 def verify_api_key(api_key: str) -> Optional[Dict[str, Any]]:
     """
-    Verify an API key by checking it against stored hashes.
-    Returns the associated user info if valid, active, and not expired.
-    Updates last_used timestamp on successful verification.
+    Verify an API key by comparing against stored bcrypt hashes, with Redis caching.
+    Fetches the associated user information if the key is valid, active, and not expired.
 
-    Note: This iterates through keys, which might be slow with many keys.
+    Args:
+        api_key: The plain text API key provided by the user.
+
+    Returns:
+        Dictionary containing user information if the key is valid, otherwise None.
+        Raises InvalidCredentialsError if the key is not found or invalid.
+
+    Note:
+        Uses Redis caching with a short TTL to reduce DB load for repeated checks of the same key.
+        The underlying DB lookup iterates through keys; consider optimization (e.g., key prefix column).
     """
+    # --- Caching Logic --- #
+    redis_client = _get_redis_client()
+    cache_key = None
+    if redis_client:
+        try:
+            # Use SHA256 hash of the key for the cache key (avoids storing raw key)
+            api_key_hash_for_cache = hashlib.sha256(api_key.encode('utf-8')).hexdigest()
+            cache_key = f"{API_KEY_CACHE_PREFIX}{api_key_hash_for_cache}"
+            
+            cached_result = redis_client.get(cache_key)
+            if cached_result:
+                logger.debug("API key verification cache hit", cache_key=cache_key)
+                if cached_result == API_KEY_CACHE_INVALID_MARKER:
+                    # Key known to be invalid from cache
+                    raise InvalidCredentialsError("Invalid API Key (cached result)")
+                else:
+                    # Valid user info found in cache
+                    try:
+                        user_info = json.loads(cached_result)
+                        # TODO: Optionally update last_used timestamp even on cache hit?
+                        # This would require fetching the APIKey object again.
+                        # For performance, skipping DB update on cache hit for now.
+                        return user_info
+                    except json.JSONDecodeError as e:
+                        logger.warning("Failed to decode cached user info for API key", cache_key=cache_key, error=str(e))
+                        # Proceed to DB check if cache data is corrupt
+            else:
+                logger.debug("API key verification cache miss", cache_key=cache_key)
+        except redis.exceptions.RedisError as e:
+            logger.warning(f"Redis error during API key cache check: {e}. Proceeding without cache.")
+            redis_client = None # Disable further cache operations on error
+        except Exception as e:
+            logger.error(f"Unexpected error during cache key generation/check: {e}", exc_info=True)
+            redis_client = None # Disable cache on unexpected error
+    # --- End Caching Logic --- #
+
     session = _get_session()
-    matched_key_object = None
-    user_info = None
+    user_info: Optional[Dict[str, Any]] = None
+    matched_key_record: Optional[APIKey] = None
 
     try:
-        # Fetch all potentially relevant API keys (active ones)
-        # Eagerly load the associated user to check user.is_active efficiently
-        candidate_keys = session.query(APIKey).options(joinedload(APIKey.user)).filter(APIKey.is_active == True).all()
+        # --- Database Lookup & Verification (executed if cache miss) --- #
+        # Performance Bottleneck: Fetch all potentially valid keys.
+        # Ideally, filter by an indexed prefix extracted from api_key here.
+        current_time = datetime.utcnow()
+        potential_keys = session.query(APIKey).options(
+            joinedload(APIKey.user).options( # Eager load user and roles
+                selectinload(User.roles)
+            )
+        ).filter(
+            APIKey.is_active == True,
+            (APIKey.expires_at == None) | (APIKey.expires_at > current_time)
+        ).all()
 
-        for key_obj in candidate_keys:
-            stored_hash_bytes = key_obj.key_hash.encode('utf-8')
-            # Check if the provided key matches the stored hash
-            if bcrypt.checkpw(api_key.encode('utf-8'), stored_hash_bytes):
-                # Found a potential match, now perform checks
-                matched_key_object = key_obj
-                logger.debug("API key hash matched", key_id=str(matched_key_object.id))
+        # Iterate and verify the hash for each key
+        for key_record in potential_keys:
+            if verify_api_key_hash(api_key, key_record.key_hash):
+                # Found a match!
+                matched_key_record = key_record
+                break # Stop searching
 
-                # Check expiry
-                if matched_key_object.expires_at and matched_key_object.expires_at < datetime.utcnow():
-                    logger.warning("API key verification failed: Key expired", key_id=str(matched_key_object.id), user_id=str(matched_key_object.user_id))
-                    # Optionally deactivate the key here:
-                    # matched_key_object.is_active = False
-                    # session.commit()
-                    matched_key_object = None # Reset match
-                    continue # Check next key if any
+        if matched_key_record:
+            # --- Key is valid, extract user info --- #
+            user = matched_key_record.user
+            if not user or not user.is_active:
+                logger.warning("API key verification failed: Associated user is inactive or not found", key_id=str(matched_key_record.id), user_id=str(user.id) if user else None)
+                # Cache the invalid result before raising error
+                if redis_client and cache_key:
+                    try: redis_client.setex(cache_key, API_KEY_CACHE_TTL, API_KEY_CACHE_INVALID_MARKER)
+                    except redis.exceptions.RedisError as e: logger.warning(f"Redis SETEX error caching invalid key: {e}")
+                raise InvalidCredentialsError("Invalid API Key")
 
-                # Check if key is active (redundant due to initial filter, but safe)
-                if not matched_key_object.is_active:
-                     logger.warning("API key verification failed: Key inactive", key_id=str(matched_key_object.id), user_id=str(matched_key_object.user_id))
-                     matched_key_object = None # Reset match
-                     continue # Check next key
+            role_list = [assoc.role for assoc in user.roles]
+            permission_list = []
+            user_info = {
+                "id": str(user.id),
+                "username": user.username,
+                "email": user.email,
+                "is_active": user.is_active,
+                "created_at": user.created_at,
+                "updated_at": user.updated_at,
+                "last_login": user.last_login,
+                "roles": role_list,
+                "permissions": permission_list
+            }
 
-                # Check if the associated user is active
-                if not matched_key_object.user or not matched_key_object.user.is_active:
-                    logger.warning("API key verification failed: Associated user inactive or not found", key_id=str(matched_key_object.id), user_id=str(matched_key_object.user_id))
-                    matched_key_object = None # Reset match
-                    continue # Check next key
+            # --- Update last used time for the key --- #
+            try:
+                matched_key_record.last_used = datetime.utcnow()
+                session.commit()
+                logger.debug("Updated last_used for API key", key_id=str(matched_key_record.id))
+            except SQLAlchemyError as update_err:
+                session.rollback()
+                logger.warning("Failed to update last_used time for API key after verification",
+                                 key_id=str(matched_key_record.id), error=str(update_err))
 
-                # --- All checks passed ---
-                logger.info("API key verified successfully", key_id=str(matched_key_object.id), user_id=str(matched_key_object.user_id))
-
-                # Update last_used time
+            logger.info("API Key verified successfully via DB", key_id=str(matched_key_record.id), user_id=str(user.id))
+            
+            # --- Cache the valid result --- #
+            if redis_client and cache_key:
                 try:
-                    matched_key_object.last_used = datetime.utcnow()
-                    session.commit()
-                    logger.debug("Updated last_used for API key", key_id=str(matched_key_object.id))
-                except SQLAlchemyError as update_err:
-                     session.rollback()
-                     logger.warning("Failed to update last_used for API key after verification",
-                                      key_id=str(matched_key_object.id), error=str(update_err))
-                     # Proceed with returning user info despite failing to update last_used
-
-                # Fetch full user details (including roles/permissions)
-                # Use the user object we already loaded via joinedload
-                user = matched_key_object.user
-                # Query roles explicitly
-                committed_roles = session.query(UserRoleAssociation.role).filter_by(user_id=user.id).all()
-                role_list = [role[0] for role in committed_roles]
-                permission_list = [] # Permissions not handled
-
-                user_info = {
-                    "id": str(user.id),
-                    "username": user.username,
-                    "email": user.email,
-                    "is_active": user.is_active,
-                    "created_at": user.created_at,
-                    "updated_at": user.updated_at,
-                    "last_login": user.last_login,
-                    "roles": role_list,
-                    "permissions": permission_list
-                }
-                break # Found valid key, stop iterating
-
-        if user_info:
-             return user_info
+                    # Serialize user_info, handling potential datetime objects if not already strings/isoformat
+                    # A helper function might be better here
+                    serializable_user_info = {k: (v.isoformat() if isinstance(v, datetime) else v) 
+                                                for k, v in user_info.items()}
+                    redis_client.setex(cache_key, API_KEY_CACHE_TTL, json.dumps(serializable_user_info))
+                    logger.debug("Cached valid API key verification result", cache_key=cache_key)
+                except (redis.exceptions.RedisError, TypeError, json.JSONDecodeError) as e:
+                     logger.warning(f"Failed to cache valid API key result: {e}")
+            
+            return user_info
         else:
-             logger.warning("API key verification failed: No valid matching key found", provided_key_partial=api_key[:10] + "...") # Log partial key for debugging
-             return None # No valid, active, unexpired key matched
+            # --- Key is invalid (no match found in DB loop) --- #
+            logger.warning("API key verification failed: No matching active key found", key_provided=api_key[:8] + "...") # Log prefix only
+            # Cache the invalid result
+            if redis_client and cache_key:
+                try: redis_client.setex(cache_key, API_KEY_CACHE_TTL, API_KEY_CACHE_INVALID_MARKER)
+                except redis.exceptions.RedisError as e: logger.warning(f"Redis SETEX error caching invalid key: {e}")
+            raise InvalidCredentialsError("Invalid API Key")
 
+    except InvalidCredentialsError: # Re-raise specific auth errors
+        # No rollback needed here as no changes were committed before the error
+        # Ensure invalid result is cached if possible
+        if redis_client and cache_key:
+           try: 
+               # Check if already cached to avoid overwriting unnecessarily
+               if not redis_client.exists(cache_key):
+                   redis_client.setex(cache_key, API_KEY_CACHE_TTL, API_KEY_CACHE_INVALID_MARKER)
+           except redis.exceptions.RedisError as e: logger.warning(f"Redis SETEX error caching invalid key (in except block): {e}")
+        raise
     except SQLAlchemyError as e:
-        # Don't rollback reads typically, but rollback if last_used update failed mid-process
-        # It's complex to track, safer to rollback on any DB error during verification
         session.rollback()
         logger.error("Database error during API key verification", error=str(e), exc_info=True)
-        raise QueryError(f"Database error verifying API key: {e}")
+        raise QueryError(f"Database error during API key verification: {e}")
     except Exception as e:
         session.rollback()
         logger.error("Unexpected error during API key verification", error=str(e), exc_info=True)
-        raise DatabaseError(f"An unexpected error occurred verifying API key: {e}")
+        raise DatabaseError(f"An unexpected error occurred during API key verification: {e}")
 
+@handle_db_session
 def get_user_api_keys(user_id: str) -> List[Dict[str, Any]]:
     """
     Get all API keys associated with a user using SQLAlchemy ORM.
@@ -623,6 +675,7 @@ def get_user_api_keys(user_id: str) -> List[Dict[str, Any]]:
         logger.error("Unexpected error retrieving API keys for user", user_id=user_id, error=str(e), exc_info=True)
         raise DatabaseError(f"An unexpected error occurred getting API keys: {e}")
 
+@handle_db_session
 def revoke_api_key(key_id: str) -> bool:
     """
     Revoke an API key by setting its is_active flag to False using SQLAlchemy ORM.
@@ -663,6 +716,7 @@ def revoke_api_key(key_id: str) -> bool:
         logger.error("Unexpected error revoking API key", key_id=key_id, error=str(e), exc_info=True)
         raise DatabaseError(f"An unexpected error occurred revoking API key: {e}")
 
+@handle_db_session
 def get_all_users(limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
     """
     Get a list of all users with pagination using SQLAlchemy ORM.

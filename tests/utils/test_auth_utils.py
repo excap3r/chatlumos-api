@@ -2,6 +2,7 @@ import pytest
 import time
 import os
 import jwt
+import bcrypt
 from services.utils.auth_utils import (
     hash_password, 
     verify_password,
@@ -9,6 +10,7 @@ from services.utils.auth_utils import (
     decode_token,
     generate_api_key,
     hash_api_key,
+    verify_api_key_hash,
     has_role,
     has_permission,
     MissingSecretError,
@@ -168,14 +170,14 @@ def test_decode_token_no_secret(mocker):
 
 # --- Tests for API Key Generation/Hashing --- 
 
-EXPECTED_API_KEY_PREFIX = "pdf_wisdom."
+EXPECTED_API_KEY_PREFIX = "sk_"
 
 def test_generate_api_key_format():
     """Test that generate_api_key has the correct prefix."""
     key = generate_api_key()
     assert isinstance(key, str)
     assert key.startswith(EXPECTED_API_KEY_PREFIX)
-    assert len(key) > len(EXPECTED_API_KEY_PREFIX)
+    assert len(key) == len(EXPECTED_API_KEY_PREFIX) + 1 + 43
 
 def test_generate_api_key_uniqueness():
     """Test that generated API keys are unique."""
@@ -183,14 +185,19 @@ def test_generate_api_key_uniqueness():
     key2 = generate_api_key()
     assert key1 != key2
 
-def test_hash_api_key_consistency():
-    """Test that hashing the same API key produces the same hash."""
+def test_hash_api_key_produces_valid_bcrypt_hash():
+    """Test that hash_api_key produces a valid bcrypt hash string."""
     key = generate_api_key()
     hash1 = hash_api_key(key)
-    hash2 = hash_api_key(key)
     assert isinstance(hash1, str)
-    assert len(hash1) == 64 # SHA-256 hex digest length
-    assert hash1 == hash2
+    assert len(hash1) >= 59 # Typical bcrypt hash length
+    assert hash1.startswith("$2b$")
+    # Verify it's a potentially valid hash by trying to check it (will throw error if invalid format)
+    # We don't care about the result, just that it doesn't raise an error on format
+    try:
+        bcrypt.checkpw(key.encode('utf-8'), hash1.encode('utf-8'))
+    except ValueError:
+        pytest.fail("hash_api_key did not produce a valid bcrypt hash format")
 
 def test_hash_api_key_difference():
     """Test that hashing different API keys produces different hashes."""
@@ -199,6 +206,30 @@ def test_hash_api_key_difference():
     hash1 = hash_api_key(key1)
     hash2 = hash_api_key(key2)
     assert hash1 != hash2
+    hash1_again = hash_api_key(key1)
+    assert hash1 != hash1_again
+
+# --- Tests for verify_api_key_hash --- 
+
+def test_verify_api_key_hash_correct():
+    """Test verify_api_key_hash with the correct key."""
+    api_key = generate_api_key()
+    key_hash = hash_api_key(api_key)
+    assert verify_api_key_hash(api_key, key_hash) is True
+
+def test_verify_api_key_hash_incorrect():
+    """Test verify_api_key_hash with an incorrect key."""
+    api_key_correct = generate_api_key()
+    api_key_incorrect = api_key_correct + "_extra"
+    key_hash = hash_api_key(api_key_correct)
+    assert verify_api_key_hash(api_key_incorrect, key_hash) is False
+
+def test_verify_api_key_hash_invalid_hash_format():
+    """Test verify_api_key_hash with an invalid hash string."""
+    api_key = generate_api_key()
+    invalid_hash = "not_a_bcrypt_hash_$"
+    # Function should handle ValueError internally and return False
+    assert verify_api_key_hash(api_key, invalid_hash) is False
 
 # --- Tests for Role/Permission Checks --- 
 

@@ -8,10 +8,10 @@ This module provides Flask middleware for tracking API requests.
 import time
 import structlog
 from functools import wraps
-from flask import request, g, Flask
+from flask import request, g, Flask, current_app
 from typing import Callable, Any
 
-from .analytics_service import AnalyticsEvent, track_event, track_api_call
+from .analytics_service import AnalyticsEvent, AnalyticsService
 
 # Set up logging
 logger = structlog.get_logger("analytics_middleware")
@@ -45,7 +45,12 @@ def setup_analytics_tracking(app: Flask) -> None:
             
             # Track the API call
             try:
-                track_api_call(g.start_time)
+                # Get service instance from app context
+                analytics_service = getattr(current_app, 'analytics_service', None)
+                if analytics_service and isinstance(analytics_service, AnalyticsService):
+                    analytics_service.track_api_call(response=response, start_time=g.start_time)
+                else:
+                    logger.warning("AnalyticsService instance not found on current_app. Cannot track API call.")
             except Exception as e:
                 logger.error("Error tracking API call analytics event", 
                              error=str(e), 
@@ -73,7 +78,13 @@ def setup_analytics_tracking(app: Flask) -> None:
                 }
             )
             
-            track_event(event)
+            # Get service instance from app context
+            analytics_service = getattr(current_app, 'analytics_service', None)
+            if analytics_service and isinstance(analytics_service, AnalyticsService):
+                analytics_service.track_event(event)
+            else:
+                logger.warning("AnalyticsService instance not found on current_app. Cannot track unhandled exception event.")
+            
             logger.warning("Unhandled exception tracked", 
                          exc_type=e.__class__.__name__, 
                          error=str(e), 
@@ -121,7 +132,12 @@ def track_specific_event(event_type: str, include_payload: bool = False) -> Call
                          error=f"Error in {event_type}: {str(func_exc)}",
                          metadata={'original_event_type': event_type}
                      )
-                     track_event(error_event)
+                     # Get service instance from app context
+                     analytics_service_inner = getattr(current_app, 'analytics_service', None)
+                     if analytics_service_inner and isinstance(analytics_service_inner, AnalyticsService):
+                         analytics_service_inner.track_event(error_event)
+                     else:
+                         logger.warning("AnalyticsService instance not found on current_app. Cannot track exception event within decorator.")
                  except Exception as tracking_error:
                      logger.error("Error tracking exception within decorator", 
                                   tracking_error=str(tracking_error), 
@@ -161,7 +177,12 @@ def track_specific_event(event_type: str, include_payload: bool = False) -> Call
                     status_code=status_code,
                     metadata=metadata
                 )
-                track_event(event)
+                # Get service instance from app context
+                analytics_service = getattr(current_app, 'analytics_service', None)
+                if analytics_service and isinstance(analytics_service, AnalyticsService):
+                    analytics_service.track_event(event)
+                else:
+                    logger.warning("AnalyticsService instance not found on current_app. Cannot track specific event.")
             except Exception as e:
                 logger.error("Error tracking specific analytics event", 
                              event_type=event_type,

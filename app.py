@@ -190,7 +190,7 @@ def create_app(config_object=AppConfig):
     # Initialize Analytics Service
     try:
         # Pass necessary initialized components if needed
-        app.analytics_service = AnalyticsService(config=app.config) 
+        app.analytics_service = AnalyticsService(config=app.config, redis_client=app.redis_client)
         logger.info("Analytics Service initialized successfully.")
     except Exception as e:
         logger.error("Error initializing Analytics Service", error=str(e), exc_info=True)
@@ -198,7 +198,7 @@ def create_app(config_object=AppConfig):
 
     # Initialize Webhook Service
     try:
-        app.webhook_service = WebhookService(config=app.config) 
+        app.webhook_service = WebhookService(config=app.config, redis_client=app.redis_client)
         logger.info("Webhook Service initialized successfully.")
     except Exception as e:
         logger.error("Error initializing Webhook Service", error=str(e), exc_info=True)

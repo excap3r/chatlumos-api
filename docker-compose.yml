@@ -9,8 +9,11 @@ services:
     restart: unless-stopped
     ports:
       - "5000:5000"
+      - "443:443"
     environment:
-      - REDIS_URL=redis://redis:6379/0
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
       - GATEWAY_URL=http://localhost:5000
       - FRONTEND_URL=http://localhost:3000
       - GUNICORN_WORKERS=4
@@ -22,8 +25,12 @@ services:
       - DB_NAME=wisdom_db
       - DB_POOL_SIZE=10
       - JWT_SECRET=${JWT_SECRET}
+      - SSL_CERTFILE=/etc/ssl/certs/cert.pem
+      - SSL_KEYFILE=/etc/ssl/private/key.pem
     volumes:
       - ./.env:/app/.env:ro
+      - ./path/to/your/cert.pem:/etc/ssl/certs/cert.pem:ro
+      - ./path/to/your/key.pem:/etc/ssl/private/key.pem:ro
     depends_on:
       - redis
       - mysql
@@ -47,10 +54,10 @@ services:
     container_name: pdf-wisdom-mysql
     restart: unless-stopped
     environment:
-      - MYSQL_ROOT_PASSWORD=root
-      - MYSQL_DATABASE=wisdom_db
-      - MYSQL_USER=wisdom_user
-      - MYSQL_PASSWORD=wisdom_password
+      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
+      - MYSQL_DATABASE=${MYSQL_DATABASE}
+      - MYSQL_USER=${MYSQL_USER}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
     volumes:
       - mysql-data:/var/lib/mysql
       - ./migrations:/docker-entrypoint-initdb.d
