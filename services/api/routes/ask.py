@@ -74,11 +74,16 @@ def ask_question():
         'updated_at': datetime.utcnow().isoformat(),
         'result': None, # Placeholder for final result
         'user_id': user_id, # Store the user ID
-        'error': None # Placeholder for error info
+        'error': None, # Placeholder for error info
+        # Add question and pdf_id for clarity in Redis state
+        'question': data.get('question'),
+        'pdf_id': data.get('pdf_id')
     }
+    # Filter out None values or convert them to empty strings before storing in Redis
+    redis_initial_state = {k: (v if v is not None else "") for k, v in initial_state.items()}
     try:
         # Use HSET to store multiple fields
-        redis_client.hset(redis_key, mapping=initial_state)
+        redis_client.hset(redis_key, mapping=redis_initial_state)
         redis_client.expire(redis_key, REDIS_TASK_TTL) # Set TTL
         logger.info(f"Stored initial state for task {task_id} in Redis.")
     except Exception as e:
@@ -89,8 +94,13 @@ def ask_question():
 
     # Enqueue the background task using Celery
     try:
-        # Pass the whole data dict, task will extract needed params
-        process_question_task.delay(task_id, data)
+        # Pass the required data including user_id to the task
+        task_data = {
+            'question': data.get('question'),
+            'pdf_id': data.get('pdf_id'),
+            'user_id': user_id
+        }
+        process_question_task.delay(task_id, task_data)
         logger.info(f"Enqueued question processing task {task_id} with Celery.")
     except Exception as e:
         logger.error(f"Failed to enqueue Celery task {task_id}: {e}", exc_info=True)

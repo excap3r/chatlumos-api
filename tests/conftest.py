@@ -186,7 +186,7 @@ class TestingConfig:
     # Celery config for testing (eager execution)
     CELERY_BROKER_URL = REDIS_URL
     CELERY_RESULT_BACKEND = REDIS_URL
-    CELERY_TASK_ALWAYS_EAGER = False # Disable eager execution for debugging hangs
+    CELERY_TASK_ALWAYS_EAGER = True # Re-enable eager execution
     CELERY_TASK_EAGER_PROPAGATES = True # Exceptions propagate in tests
 
     # Other app configs needed for testing

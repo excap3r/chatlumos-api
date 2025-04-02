@@ -9,6 +9,8 @@ from werkzeug.utils import secure_filename
 from datetime import datetime, timedelta
 from typing import Optional
 import base64 # Added for upload route
+from werkzeug.exceptions import BadRequest # Import BadRequest
+import structlog
 
 # Import middleware and utilities
 # from services.auth_middleware import auth_required # Assuming it can access user context
@@ -28,6 +30,9 @@ from services.utils.api_helpers import rate_limit
 # from services.decorators import rate_limit # Adjusted relative import
 from services.config import AppConfig # Added for REDIS_TASK_TTL
 # from services.utils.error_utils import APIError, ValidationError # Already imported above
+
+# Configure logger
+logger = structlog.get_logger(__name__)
 
 pdf_bp = Blueprint('pdf', __name__)
 
@@ -65,30 +70,33 @@ def upload_pdf():
     Returns:
         JSON with task_id for tracking progress.
     """
-    logger = current_app.logger
     redis_client = current_app.redis_client
+    logger = current_app.logger
 
     if not redis_client:
          logger.error("Redis client not configured for PDF upload route.")
-         return handle_error("Service configuration error.", 500)
+         raise APIError("Service configuration error.", 500)
 
     # Check file part
     if 'file' not in request.files:
-        return handle_error("No file part in the request", 400)
+        logger.warning("Upload attempt missing 'file' part")
+        raise BadRequest("No file part named 'file' in request")
     
     file = request.files['file']
     
     if file.filename == '':
-        return handle_error("No file selected for uploading", 400)
+        logger.warning("Upload attempt with empty filename")
+        raise BadRequest("No file selected for uploading")
     
     # Check if the file is allowed (PDF)
     if not allowed_file(file.filename):
-        return handle_error("Invalid file type, only PDF allowed", 400)
+        logger.warning(f"Upload attempt with invalid file type: {file.filename}")
+        raise BadRequest("Invalid file type, only PDF allowed")
 
     # Check user auth context 
     if not hasattr(g, 'user') or not g.user or 'id' not in g.user:
          logger.error("User context not found in g after @auth_required decorator")
-         return handle_error("Authentication context missing or invalid", 500)
+         raise APIError("Authentication context missing or invalid", 500)
     user_id = g.user['id']
 
     # Generate secure filename and unique task ID
@@ -101,12 +109,13 @@ def upload_pdf():
     try:
         file_content = file.read()
         if not file_content:
-            return handle_error("Uploaded file content is empty.", 400)
+            logger.warning(f"Uploaded file {filename} content is empty.")
+            raise BadRequest("Uploaded file content is empty.")
         file_content_b64 = base64.b64encode(file_content).decode('utf-8')
         logger.info(f"Read and encoded file {filename} for task {task_id}")
     except Exception as read_err:
         logger.error(f"Failed to read or encode uploaded file {filename}: {read_err}")
-        return handle_error(f"Failed to read uploaded file: {read_err}", 500)
+        raise APIError(f"Failed to read uploaded file: {read_err}", 500)
 
     # Get other form data for the task
     author_name = request.form.get('author') # Match task arg name
@@ -122,17 +131,19 @@ def upload_pdf():
         'started_at': datetime.utcnow().isoformat(),
         'updated_at': datetime.utcnow().isoformat(),
         'user_id': user_id,
-        'result': None,
-        'error': None
+        'result': None, # Store None as empty string for Redis
+        'error': None   # Store None as empty string for Redis
     }
+    # Filter out None values or convert them to empty strings before storing in Redis
+    redis_initial_state = {k: (v if v is not None else "") for k, v in initial_state.items()}
     try:
         # Use HSET to store multiple fields
-        redis_client.hset(redis_key, mapping=initial_state)
+        redis_client.hset(redis_key, mapping=redis_initial_state)
         redis_client.expire(redis_key, AppConfig.REDIS_TASK_TTL_SECONDS) # Use AppConfig TTL
         logger.info(f"Stored initial state for PDF task {task_id} in Redis.")
     except Exception as e:
         logger.error(f"Failed to store initial PDF task state in Redis for task {task_id}: {e}")
-        return handle_error(f"Failed to initiate PDF processing: {e}", 500)
+        raise APIError(f"Failed to initiate PDF processing: {e}", 500)
 
     # Enqueue the background task using Celery
     try:
@@ -151,6 +162,6 @@ def upload_pdf():
     except Exception as e:
         logger.error(f"Failed to enqueue Celery task {task_id}: {e}", exc_info=True)
         # No file to clean up now, just return error
-        return handle_error(f"Failed to enqueue PDF processing task: {e}", 500)
+        raise APIError(f"Failed to enqueue PDF processing task: {e}", 500)
 
     return jsonify({"task_id": task_id, "status": "PDF processing task queued", "filename": filename}), 202 # Updated status message 

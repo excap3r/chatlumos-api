@@ -2,9 +2,11 @@ import json
 import time
 from flask import Blueprint, jsonify, Response, stream_with_context, current_app, g
 from datetime import datetime, timedelta
+from werkzeug.exceptions import NotFound, Forbidden # Import Forbidden
+from redis.exceptions import LockError
 
 # Import utility
-from services.utils.error_utils import APIError
+from services.utils.error_utils import APIError, handle_error, ValidationError
 from services.config import AppConfig
 # Import auth decorator
 from services.api.middleware.auth_middleware import require_auth
@@ -15,74 +17,76 @@ progress_bp = Blueprint('progress_bp', __name__)
 # PROGRESS_TIMEOUT = 300 # seconds (Overall timeout for the connection)
 # PUBSUB_LISTEN_TIMEOUT = 1.0 # Timeout for pubsub.listen() in seconds
 
+# Constants
+REDIS_TASK_TTL = 86400 # 24 hours in seconds
+DEFAULT_PROGRESS_TIMEOUT = 300 # 5 minutes
+PUBSUB_LISTEN_TIMEOUT = 1.0 # Check connection/timeout every 1 second
+
 @progress_bp.route('/progress/<task_id>', methods=['GET'])
 @require_auth() # Add authentication check
 def stream_progress(task_id):
-    """Streams progress updates for a given task ID using Redis Pub/Sub and SSE."""
-    redis_client = current_app.redis_client
+    """Stream task progress updates using Server-Sent Events (SSE)."""
     logger = current_app.logger
-    redis_key = f"task:{task_id}" # Key for initial state fetch
-    pubsub_channel = f"progress:{task_id}" # Channel to subscribe to
-    
-    # Read timeouts from config
-    progress_timeout = AppConfig.PROGRESS_STREAM_TIMEOUT
-    pubsub_listen_timeout = AppConfig.PROGRESS_PUBSUB_LISTEN_TIMEOUT
+    redis_client = current_app.redis_client
+    progress_timeout = current_app.config.get('PROGRESS_STREAM_TIMEOUT', DEFAULT_PROGRESS_TIMEOUT)
+    pubsub_channel = f"progress:{task_id}"
+    redis_key = f"task:{task_id}"
+    current_user_id = g.user.get('id')
 
     if not redis_client:
-        # Raise 503 Service Unavailable if Redis is essential
-        raise APIError("Service temporarily unavailable: Cannot stream progress.", status_code=503)
+        logger.error("Redis client not configured for progress streaming.")
+        raise APIError("Server configuration error: Cannot stream progress.", 500)
 
+    # --- Authorization Check (Moved before generator) --- #
+    try:
+        initial_state = redis_client.hgetall(redis_key)
+        if not initial_state:
+            logger.warning(f"Task key {redis_key} not found for progress stream.")
+            return jsonify({
+                "error": "Not Found", 
+                "message": "Task not found or expired"
+            }), 404
+
+        task_user_id = initial_state.get('user_id')
+        if not task_user_id or task_user_id != current_user_id:
+            logger.warning(f"Authorization failed for task progress stream - TaskID: {task_id}, Owner: {task_user_id}, Requester: {current_user_id}")
+            return jsonify({
+                "error": "Forbidden",
+                "message": "You do not have permission to view this task progress."
+            }), 403
+
+        # Initial state is valid and user is authorized, prepare it for sending
+        # No decoding needed here if fakeredis returns strings
+        task_data = initial_state
+        if 'result' in task_data and task_data['result']:
+            try: task_data['result'] = json.loads(task_data['result'])
+            except: pass
+        if 'progress' in task_data:
+            try: task_data['progress'] = int(task_data['progress'])
+            except: task_data['progress'] = 0
+            
+    except redis.RedisError as e:
+         logger.error(f"Redis error fetching initial state for task {task_id}: {e}")
+         raise APIError("Failed to fetch task state.", 500)
+    except Exception as e:
+        logger.error(f"Unexpected error during initial check for task {task_id}: {e}", exc_info=True)
+        raise APIError("An unexpected error occurred.", 500)
+    # --- End Authorization Check --- #
+
+    # If authorization passed, define the generator
     def generate_progress():
+        pubsub = None # Initialize pubsub to None for finally block
         start_time = time.time()
-        pubsub = None # Initialize pubsub object
-        
         try:
-            # 1. Fetch and send initial state from Hash immediately
-            try:
-                if redis_client.exists(redis_key):
-                    task_data_bytes = redis_client.hgetall(redis_key)
-                    task_data = {k.decode('utf-8'): v.decode('utf-8') for k, v in task_data_bytes.items()}
-                    
-                    # --- Authorization Check --- #
-                    task_user_id = task_data.get('user_id')
-                    authenticated_user_id = g.user.get('id')
-                    # Check if the authenticated user owns the task
-                    # TODO: Add admin check here if admins should bypass this (e.g., if 'admin' in g.user.get('roles', []))
-                    if task_user_id != authenticated_user_id:
-                        logger.warning(f"Authorization failed for task progress stream", 
-                                         task_id=task_id, task_owner=task_user_id, 
-                                         requesting_user=authenticated_user_id)
-                        yield f"event: error\ndata: {json.dumps({'error': 'Forbidden', 'message': 'You do not have permission to view this task progress.'})}\n\n"
-                        return # End the generator immediately
-                    # --- End Authorization Check --- #
-                    
-                    # Prepare and send initial state
-                    if 'result' in task_data and task_data['result']:
-                         try: task_data['result'] = json.loads(task_data['result']) 
-                         except: pass # Ignore decode error on initial fetch
-                    if 'progress' in task_data:
-                         try: task_data['progress'] = int(task_data['progress'])
-                         except: task_data['progress'] = 0
-                         
-                    event_type = task_data.get('status', 'update').lower()
-                    yield f"event: {event_type}\ndata: {json.dumps(task_data)}\n\n"
-                    logger.debug(f"Sent initial state for task {task_id}: Status={task_data.get('status')}")
-                    
-                    # If already completed/failed, end stream
-                    if task_data.get('status') in ["Completed", "Failed"]:
-                        logger.info(f"Task {task_id} already in terminal state ({task_data.get('status')}) on connect.")
-                        return # End the generator
-                else:
-                     logger.warning(f"Task key {redis_key} not found on initial fetch.")
-                     # Optionally send an error event immediately
-                     # yield f"event: error\ndata: {json.dumps({'message': 'Task not found or expired'})}\n\n"
-                     # return 
+            # 1. Send initial state immediately
+            event_type = task_data.get('status', 'update').lower()
+            yield f"event: {event_type}\ndata: {json.dumps(task_data)}\n\n"
+            logger.debug(f"Sent initial state for task {task_id}: Status={task_data.get('status')}")
 
-            except Exception as initial_e:
-                logger.error(f"Error fetching initial state for task {task_id}: {initial_e}")
-                # Decide if we should send error and exit, or just continue to listen
-                yield f"event: error\ndata: {json.dumps({'message': f'Error fetching initial state: {str(initial_e)}'})}\n\n"
-                # return # Optionally end stream here
+            # If already completed/failed, end stream
+            if task_data.get('status') in ["Completed", "Failed"]:
+                logger.info(f"Task {task_id} already in terminal state ({task_data.get('status')}) on connect.")
+                return # End the generator
 
             # 2. Subscribe and listen for updates
             pubsub = redis_client.pubsub(ignore_subscribe_messages=True)
@@ -97,48 +101,44 @@ def stream_progress(task_id):
                     break
 
                 # Listen for messages
-                message = pubsub.get_message(timeout=pubsub_listen_timeout)
+                message = pubsub.get_message(timeout=PUBSUB_LISTEN_TIMEOUT)
                 
                 if message is None:
                     # No message received within timeout, continue loop to check overall timeout
                     continue
                 
                 if message['type'] == 'message':
-                    message_data_str = message['data'].decode('utf-8')
+                    # Assuming messages are already strings due to decode_responses=True
+                    message_data_str = message['data'] 
                     logger.debug(f"Received message on {pubsub_channel}: {message_data_str[:100]}...")
                     try:
                         # Data should be the JSON string published by the task
-                        task_data = json.loads(message_data_str)
+                        received_task_data = json.loads(message_data_str)
                         
                         # Yield the received update
-                        event_type = task_data.get('status', 'update').lower()
+                        event_type = received_task_data.get('status', 'update').lower()
                         yield f"event: {event_type}\ndata: {message_data_str}\n\n" 
                         
                         # Check for terminal states in the message
-                        if task_data.get('status') in ["Completed", "Failed"]:
-                            logger.info(f"Task {task_id} reached terminal state via PubSub: {task_data.get('status')}. Closing stream.")
+                        if received_task_data.get('status') in ["Completed", "Failed"]:
+                            logger.info(f"Task {task_id} reached terminal state via PubSub: {received_task_data.get('status')}. Closing stream.")
                             break # Exit loop
                             
                     except json.JSONDecodeError as json_e:
                         logger.error(f"Failed to decode JSON from PubSub message for task {task_id}: {json_e} - Data: {message_data_str}")
                     except Exception as proc_e:
                          logger.error(f"Error processing PubSub message for task {task_id}: {proc_e}")
-                         # Optionally send an error event to the client
                          yield f"event: error\ndata: {json.dumps({'message': f'Error processing update: {str(proc_e)}'})}\n\n"
-                         # Decide whether to break or continue listening
-                         # break 
 
         except GeneratorExit:
              logger.info(f"Client disconnected from SSE stream for task {task_id}.")
         except Exception as e:
             logger.error(f"Unhandled error in SSE generator for task {task_id}: {e}", exc_info=True)
             try:
-                 # Try to send a final error message if possible
                  yield f"event: error\ndata: {json.dumps({'message': 'An internal server error occurred generating progress.'})}\n\n"
             except Exception:
-                 pass # Ignore if cannot send
+                 pass
         finally:
-            # Clean up PubSub subscription
             if pubsub:
                 try:
                     pubsub.unsubscribe(pubsub_channel)
@@ -148,5 +148,5 @@ def stream_progress(task_id):
                      logger.error(f"Error closing PubSub for task {task_id}: {pubsub_close_e}")
             logger.debug(f"Finished SSE stream generator for task {task_id}")
 
-    # Return the streaming response
+    # Return the streaming response, wrapping the generator
     return Response(stream_with_context(generate_progress()), mimetype='text/event-stream') 

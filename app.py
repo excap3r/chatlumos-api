@@ -14,6 +14,11 @@ import redis
 import structlog
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, scoped_session
+from celery import Celery
+from flask_jwt_extended import JWTManager
+from werkzeug.exceptions import HTTPException, NotFound, BadRequest
+from pydantic import ValidationError as PydanticValidationError # Import Pydantic's error
+import json # Import json
 
 # Import configuration first
 from services.config import AppConfig
@@ -42,8 +47,10 @@ from services.api.routes.root import root_bp
 
 # Import error handling utilities
 from services.utils.error_utils import APIError, ValidationError, format_error_response
-from werkzeug.exceptions import NotFound
-from pydantic import ValidationError as PydanticValidationError
+# Middleware is applied via decorators in routes, no global init needed here
+# from services.api.middleware.auth_middleware import init_auth_middleware 
+# Rate limiting applied via decorator in routes, no global init needed
+# from services.utils.rate_limit import init_rate_limiter 
 
 # Import Service Classes for Initialization
 # from services.db.user_db import UserDB # Removed obsolete import
@@ -55,8 +62,11 @@ from services.analytics.webhooks.webhook_service import WebhookService
 # Import flask-swagger-ui
 from flask_swagger_ui import get_swaggerui_blueprint
 
-# Initialize logger early for potential issues during import or setup
-logger = structlog.get_logger(__name__)
+# --- Initialize Loggers ---
+# Use structlog.get_logger directly where needed
+logger = structlog.get_logger("app") # General application logger
+request_logger = structlog.get_logger("request_logger") # Used in request hooks
+error_logger = structlog.get_logger("error_handler") # Used in error handlers
 
 # --- Swagger UI Setup --- #
 SWAGGER_URL = '/api/v1/docs'  # URL for exposing Swagger UI (must be Blueprint prefix + /docs)
@@ -233,7 +243,6 @@ def create_app(config_object=AppConfig):
 
 
     # --- Centralized Error Handling --- #
-    error_logger = structlog.get_logger("error_handler")
 
     @app.errorhandler(APIError)
     def handle_api_error(error: APIError):
@@ -296,7 +305,10 @@ def create_app(config_object=AppConfig):
 
     @app.errorhandler(Exception) # Catch-all for other exceptions (500)
     def handle_generic_exception(error: Exception):
-        """Handle unexpected exceptions and return a generic 500 error."""""
+        """Handle unexpected non-HTTP exceptions and return a generic 500 error.
+        HTTPExceptions are handled by the dedicated `handle_http_exception`.
+        """
+        # For non-HTTP exceptions, log as 500 and return generic message
         error_logger.error("Unhandled exception occurred", 
                            error=str(error),
                            exception_type=type(error).__name__,
@@ -312,6 +324,28 @@ def create_app(config_object=AppConfig):
         # if not app.config['DEBUG']:
         #     response_dict['message'] = "An unexpected error occurred."
         return jsonify(response_dict), 500
+
+    # Add back the handler for all HTTPExceptions to return JSON
+    @app.errorhandler(HTTPException)
+    def handle_http_exception(e):
+        """Return JSON instead of HTML for HTTP errors."""
+        # Explicitly import redis here as a workaround for a NameError
+        # that occurs specifically when Forbidden is raised before streaming.
+        # This suggests a context issue during Flask's error handling for certain exceptions.
+        import redis
+        import json 
+        # start with the correct headers and status code from the error
+        response = e.get_response()
+        # replace the body with JSON
+        response.data = json.dumps({
+            "code": e.code,
+            "name": e.name,
+            "description": e.description,
+            "error": e.name # Adding error field for consistency
+        })
+        response.content_type = "application/json"
+        error_logger.info("HTTP Exception handled", code=e.code, name=e.name, path=request.path)
+        return response
         
     logger.info("Centralized error handlers registered.")
 
