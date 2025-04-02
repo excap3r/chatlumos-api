@@ -45,7 +45,7 @@ from services.utils.error_utils import APIError, format_error_response
 from werkzeug.exceptions import NotFound
 
 # Import Service Classes for Initialization
-from services.db.user_db import UserDB
+# from services.db.user_db import UserDB # Removed obsolete import
 from services.llm_service.llm_service import LLMService
 from services.vector_search.vector_search import VectorSearchService
 from services.analytics.analytics_service import AnalyticsService
@@ -158,16 +158,16 @@ def create_app(config_object=AppConfig):
     else:
         logger.warning("REDIS_URL not configured. Redis client not initialized.")
 
-    # Initialize User Database Pool (Note: This might be replaced by SQLAlchemy session later)
-    try:
-        app.user_db_pool = UserDB.create_pool(app.config)
-        if app.user_db_pool:
-            logger.info("UserDB MySQL connection pool created successfully. (Will be replaced by ORM)")
-        else:
-            logger.error("Failed to create UserDB MySQL connection pool.")
-    except Exception as e:
-        logger.error("Error creating UserDB MySQL connection pool", error=str(e), exc_info=True)
-        app.user_db_pool = None # Ensure it's None if init fails
+    # Initialize User Database Pool (Note: This might be replaced by SQLAlchemy session later) - REMOVED Block
+    # try:
+    #     app.user_db_pool = UserDB.create_pool(app.config)
+    #     if app.user_db_pool:
+    #         logger.info("UserDB MySQL connection pool created successfully. (Will be replaced by ORM)")
+    #     else:
+    #         logger.error("Failed to create UserDB MySQL connection pool.")
+    # except Exception as e:
+    #     logger.error("Error creating UserDB MySQL connection pool", error=str(e), exc_info=True)
+    #     app.user_db_pool = None # Ensure it's None if init fails
 
     # Initialize LLM Service
     try:

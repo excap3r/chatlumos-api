@@ -24,10 +24,10 @@ if not logger.hasHandlers():
 
 # Import Services and Config
 from services.config import AppConfig # Added
-from services.llm_service import LLMService
-from services.vector_search import VectorSearchService
+from services.llm_service.llm_service import LLMService
+from services.vector_search.vector_search import VectorSearchService
 from services.pdf_processor.pdf_processor import PDFProcessor # Added for text extraction/chunking
-from services.utils.error_utils import ServiceError # Use shared error type
+from services.utils.error_utils import APIError # Use shared error type
 import structlog # Added for consistency
 
 # Placeholder if translate_text isn't easily importable - requires refactor
@@ -96,7 +96,7 @@ def process_pdf_async(file_path, author_name, title, language, translate_to_engl
                  json={"file_path": file_path} # Service needs access to this path
             )
             if "error" in extract_result:
-                 raise ServiceError(f"Text extraction failed: {extract_result['error']}")
+                 raise APIError(f"Text extraction failed: {extract_result['error']}", 500)
             text = extract_result.get("text", "")
             page_count = extract_result.get("page_count", 0)
             if not text:
@@ -106,7 +106,7 @@ def process_pdf_async(file_path, author_name, title, language, translate_to_engl
         except Exception as e:
              logger.error(f"[Session {session_id}] Error during text extraction: {e}", exc_info=True)
              update_progress("extract_text", "error", error=str(e))
-             raise # Stop processing
+             raise APIError(f"Text extraction failed: {str(e)}", 500) # Stop processing
 
         # Step 2: Translate Text (Optional)
         original_text = text # Keep original for potential use
@@ -117,7 +117,7 @@ def process_pdf_async(file_path, author_name, title, language, translate_to_engl
                  # translated_text_dict = translate_text_internal(text, "en", language)
                  translated_text_dict = translate_text_placeholder(text, "en", language, logger)
                  if "error" in translated_text_dict:
-                      raise ServiceError(f"Translation failed: {translated_text_dict['error']}")
+                      raise APIError(f"Translation failed: {translated_text_dict['error']}", 500)
                  text = translated_text_dict.get("translated_text", "")
                  if not text:
                       raise ValueError("Translated text is empty.")
@@ -149,7 +149,7 @@ def process_pdf_async(file_path, author_name, title, language, translate_to_engl
                  }
             )
             if "error" in chunk_result:
-                 raise ServiceError(f"Text chunking failed: {chunk_result['error']}")
+                 raise APIError(f"Text chunking failed: {chunk_result['error']}", 500)
             chunks = chunk_result.get("chunks", [])
             if not chunks:
                  raise ValueError("No chunks created from text.")
@@ -158,7 +158,7 @@ def process_pdf_async(file_path, author_name, title, language, translate_to_engl
         except Exception as e:
              logger.error(f"[Session {session_id}] Error during text chunking: {e}", exc_info=True)
              update_progress("chunk_text", "error", error=str(e))
-             raise # Stop processing
+             raise APIError(f"Text chunking failed: {str(e)}", 500) # Stop processing
 
         # Step 4: Extract Concepts/Keywords (Optional but useful) using LLM Service
         update_progress("extract_concepts", "running", details={"message": "Extracting key concepts..."})
@@ -209,7 +209,7 @@ def process_pdf_async(file_path, author_name, title, language, translate_to_engl
                  json=doc_data
             )
             if "error" in db_result:
-                 raise ServiceError(f"Failed to store document metadata: {db_result['error']}")
+                 raise APIError(f"Failed to store document metadata: {db_result['error']}", 500)
             doc_id = db_result.get("id")
             if not doc_id:
                  raise ValueError("Database did not return a document ID.")
@@ -218,7 +218,7 @@ def process_pdf_async(file_path, author_name, title, language, translate_to_engl
         except Exception as e:
              logger.error(f"[Session {session_id}] Error storing document metadata: {e}", exc_info=True)
              update_progress("store_metadata", "error", error=str(e))
-             raise # Stop processing if metadata fails
+             raise APIError(f"Database error during document creation: {str(e)}", 500) # Stop processing if metadata fails
              
         # Step 6: Create Embeddings and Store in Vector Service
         update_progress("store_vectors", "running", details={"message": f"Generating and storing {len(chunks)} vector embeddings..."})
@@ -247,7 +247,7 @@ def process_pdf_async(file_path, author_name, title, language, translate_to_engl
                  }
             )
             if "error" in embed_result:
-                 raise ServiceError(f"Failed to store vector embeddings: {embed_result['error']}")
+                 raise APIError(f"Failed to store vector embeddings: {embed_result['error']}", 500)
             
             stored_count = embed_result.get("stored_count", 0)
             if stored_count != len(chunks):
@@ -260,7 +260,7 @@ def process_pdf_async(file_path, author_name, title, language, translate_to_engl
              logger.error(f"[Session {session_id}] Error storing vector embeddings: {e}", exc_info=True)
              update_progress("store_vectors", "error", error=str(e))
              # Consider cleanup or marking document as partially indexed?
-             raise # Stop processing
+             raise APIError(f"Vector service error: {str(e)}", 500) # Stop processing
 
         # Processing Successful
         logger.info(f"[Session {session_id}] PDF processing completed successfully for doc ID {doc_id}")
@@ -408,7 +408,7 @@ def process_pdf_task(self, task_id: str, file_content_b64: str, filename: str, u
                                       status="Failed", progress=0, details="Service initialization failed.",
                                       error=f"Service init error: {service_init_err}")
         self.update_state(state='FAILURE', meta={'exc_type': type(service_init_err).__name__, 'exc_message': f"Service init failed: {service_init_err}"})
-        raise
+        raise APIError(f"Service initialization failed: {service_init_err}", 500)
 
     # Check essential clients
     if not redis_client:
@@ -463,7 +463,7 @@ def process_pdf_task(self, task_id: str, file_content_b64: str, filename: str, u
                  document_id = temp_api_response['document_id']
             else:
                  # Handle API error appropriately (log, update status, potentially raise)
-                 raise ServiceError("API call to create document record failed.")
+                 raise APIError("API call to create document record failed.", 500)
             # --- End Simulation ---
             # document_id = DBService.create_document( # Original call removed
             #     filename=filename,
@@ -471,13 +471,13 @@ def process_pdf_task(self, task_id: str, file_content_b64: str, filename: str, u
             #     author=author_name,
             # )
             if document_id is None:
-                raise ServiceError("Failed to create initial document record (via API call).") # Adjusted error message
+                raise APIError("Failed to create initial document record (via API call).", 500) # Adjusted error message
             logger.info("Document registered via API call (placeholder)", document_id=document_id)
             _update_pdf_task_progress(redis_client, redis_key, pubsub_channel, effective_task_id, logger,
                                       status="Processing", progress=15, details="Document registered.")
         except Exception as db_err:
             logger.error("Error registering document in DB", error=str(db_err), exc_info=True)
-            raise ServiceError(f"Database error during document creation: {db_err}") from db_err
+            raise APIError(f"Database error during document creation: {db_err}", 500) from db_err
 
         # --- Step 2: Extract Text ---
         _update_pdf_task_progress(redis_client, redis_key, pubsub_channel, effective_task_id, logger,
@@ -487,13 +487,13 @@ def process_pdf_task(self, task_id: str, file_content_b64: str, filename: str, u
             extracted_text = pdf_processor.extract_text(pdf_file_like.getvalue()) # Pass bytes
             if not extracted_text:
                 # Handle empty extraction - maybe update status and stop?
-                raise ValueError("Extracted text is empty. PDF might be image-based or corrupted.")
+                raise APIError("Extracted text is empty. PDF might be image-based or corrupted.", 500)
             logger.info("Text extracted successfully", length=len(extracted_text))
             _update_pdf_task_progress(redis_client, redis_key, pubsub_channel, effective_task_id, logger,
                                       status="Processing", progress=35, details=f"Text extracted ({len(extracted_text)} chars).")
         except Exception as extract_err:
             logger.error("Error during text extraction", error=str(extract_err), exc_info=True)
-            raise ServiceError(f"Text extraction failed: {extract_err}") from extract_err
+            raise APIError(f"Text extraction failed: {extract_err}", 500) from extract_err
 
         # --- Step 3: Translate Text (Optional) ---
         final_text = extracted_text
@@ -510,7 +510,7 @@ def process_pdf_task(self, task_id: str, file_content_b64: str, filename: str, u
                     max_tokens=int(len(extracted_text) * 1.5 / 3) # Rough estimate
                 )
                 if llm_response.is_error:
-                     raise ServiceError(f"Translation failed: {llm_response.error}")
+                     raise APIError(f"Translation failed: {llm_response.error}", 500)
                 final_text = llm_response.content
                 processing_language = 'en'
                 logger.info("Text translated successfully", length=len(final_text))
@@ -534,13 +534,13 @@ def process_pdf_task(self, task_id: str, file_content_b64: str, filename: str, u
             chunks = chunk_text(final_text, chunk_size=chunk_size, overlap=chunk_overlap)
 
             if not chunks:
-                raise ValueError("No chunks created from text.")
+                raise APIError("No chunks created from text.", 500)
             logger.info(f"Text chunked successfully", chunk_count=len(chunks))
             _update_pdf_task_progress(redis_client, redis_key, pubsub_channel, effective_task_id, logger,
                                       status="Processing", progress=70, details=f"Text chunked into {len(chunks)} pieces.")
         except Exception as chunk_err:
             logger.error("Error during text chunking", error=str(chunk_err), exc_info=True)
-            raise ServiceError(f"Text chunking failed: {chunk_err}") from chunk_err
+            raise APIError(f"Text chunking failed: {chunk_err}", 500) from chunk_err
 
         # --- Step 5: Store Chunks and Update Document ---
         _update_pdf_task_progress(redis_client, redis_key, pubsub_channel, effective_task_id, logger,
@@ -598,7 +598,7 @@ def process_pdf_task(self, task_id: str, file_content_b64: str, filename: str, u
             logger.error("Error during chunk storage step (API calls)", error=str(db_chunk_err), exc_info=True)
             # -- Removed direct DB status update on error --
             # DBService.update_document_status(document_id=document_id, status='error_db') # Removed
-            raise ServiceError(f"Error during chunk storage API calls: {db_chunk_err}") from db_chunk_err # Adjusted error message
+            raise APIError(f"Error during chunk storage API calls: {db_chunk_err}", 500) from db_chunk_err # Adjusted error message
 
         # --- Step 6: Generate Embeddings and Store Vectors ---
         _update_pdf_task_progress(redis_client, redis_key, pubsub_channel, effective_task_id, logger,
@@ -625,7 +625,7 @@ def process_pdf_task(self, task_id: str, file_content_b64: str, filename: str, u
                  docs_to_embed.append((chunk_text_content, metadata)) # Tuple format for add_documents
 
             if not docs_to_embed:
-                raise ValueError("No valid chunks available for embedding after storage.")
+                raise APIError("No valid chunks available for embedding after storage.", 500)
 
             # Use VectorSearchService to add documents (handles embedding)
             success_count, failure_count = vector_service.add_documents(user_id=user_id, documents=docs_to_embed)
@@ -659,7 +659,7 @@ def process_pdf_task(self, task_id: str, file_content_b64: str, filename: str, u
             logger.error("Error during vector embedding/storage", error=str(vector_err), exc_info=True)
             # -- Removed direct DB status update on error --
             # DBService.update_document_status(document_id=document_id, status='error_vector_storage') # Removed
-            raise ServiceError(f"Vector service error: {vector_err}") from vector_err
+            raise APIError(f"Vector service error: {vector_err}", 500) from vector_err
 
     except Exception as e:
         logger.error("Unhandled error during PDF processing task", error=str(e), exc_info=True)
@@ -678,4 +678,15 @@ def process_pdf_task(self, task_id: str, file_content_b64: str, filename: str, u
              logger.warning("Final error occurred, DB status not updated directly from task. Relying on Redis/Celery state.", document_id=document_id)
         # Update Celery state
         self.update_state(state='FAILURE', meta={'exc_type': type(e).__name__, 'exc_message': traceback.format_exc()})
-        raise # Re-raise the exception
+        # Ensure we raise APIError for consistency if it's a service-related failure, otherwise let original exception propagate for retry
+        if isinstance(e, APIError): # Check if it's already an APIError we raised
+            self.update_state(state='FAILURE', meta={'exc_type': type(e).__name__, 'exc_message': e.message, 'status_code': e.status_code})
+            # Don't re-raise if state is set? Or re-raise to ensure Celery retry logic if appropriate?
+            # Let's re-raise for now to be safe with retry logic.
+            raise e 
+        else: # For other unexpected errors, wrap in APIError before raising?
+             self.update_state(state='FAILURE', meta={'exc_type': type(e).__name__, 'exc_message': traceback.format_exc()}) 
+             # Wrap unexpected errors in APIError for consistent task failure reporting?
+             raise APIError(f"Unhandled error during PDF processing: {str(e)}", 500) from e
+             # Or just re-raise original for Celery's default retry based on Exception
+             # raise # Let's stick with raising the original for now to leverage default retry

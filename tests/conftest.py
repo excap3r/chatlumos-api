@@ -1,17 +1,29 @@
 import pytest
 import fakeredis
-from app import app as flask_app  # Import the Flask app instance from app.py
+from app import create_app # Assuming your Flask app factory is here
 from celery_app import celery_app # Import celery instance
+from unittest.mock import patch, MagicMock
+from flask import Flask, g
+from functools import wraps # Added for wraps
+# from services.config import TestingConfig # REMOVED import
+import os
+
+# Set environment for testing BEFORE creating app
+os.environ['FLASK_ENV'] = 'testing'
 
 @pytest.fixture(scope='session')
 def app():
-    """Session-wide test Flask application configured for integration tests."""
-    
-    # Set Flask config for testing
-    flask_app.config.update({
-        "TESTING": True,
-        # Add other test-specific configurations here if needed
-    })
+    """Session-wide test `Flask` application."""
+    # Use the default config from create_app, then override
+    _app = create_app() 
+    _app.config['TESTING'] = True
+    _app.config['WTF_CSRF_ENABLED'] = False # Disable CSRF for testing forms
+    # Add other test-specific overrides if needed
+    # _app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///:memory:'
+
+    # Establish an application context before running tests
+    ctx = _app.app_context()
+    ctx.push()
 
     # --- Configure Celery for Eager Execution --- 
     celery_app.conf.update(task_always_eager=True) 
@@ -21,25 +33,31 @@ def app():
     # Note: decode_responses=True is important for matching real redis behavior
     fake_redis_instance = fakeredis.FakeStrictRedis(decode_responses=True)
     # Inject this instance into the Flask app so it's used consistently
-    flask_app.redis_client = fake_redis_instance
+    _app.redis_client = fake_redis_instance
 
     # If API Gateway client is used, consider mocking it
-    # if flask_app.api_gateway:
+    # if _app.api_gateway:
     #     # Example: Replace with mock
     #     pass
 
-    yield flask_app
+    yield _app
     
     # --- Teardown --- 
     # Reset Celery config if necessary (though session scope might make this less critical)
     celery_app.conf.update(task_always_eager=False) 
     # No need to clear fake_redis_instance here if we manage it in a function-scoped fixture
 
+    ctx.pop()
 
 @pytest.fixture()
-def client(app):
+def client(app: Flask):
     """A test client for the app."""
     return app.test_client()
+
+@pytest.fixture
+def runner(app: Flask):
+    """A test runner for the app's Click commands."""
+    return app.test_cli_runner()
 
 # Modify fake_redis to use the instance from the app fixture
 # and clear it for each test function
@@ -58,7 +76,6 @@ def redis_client(app):
     # Optional: Clear after test execution (good practice)
     client.flushall()
 
-
 # Remove the old fake_redis fixture as it's replaced by redis_client
 # @pytest.fixture(scope='function') 
 # def fake_redis(app):
@@ -70,43 +87,94 @@ def configured_celery_app():
     """Returns the configured Celery app instance."""
     return celery_app
 
-# --- Authentication Mocking Fixture --- #
+# --- Mocking Fixtures --- #
+
 @pytest.fixture
-def mock_auth_user(mocker, app):
-    """Fixture factory to mock flask.g.user for authenticated routes."""
-    
-    def _mock_user(user_id="test-user-123", roles=None, permissions=None, auth_method="JWT"):
-        """Mocks flask.g.user with specified details."""
+def mock_auth():
+    """Fixture to mock the @require_auth decorator factory.
+
+    Returns a function that, when called, patches the decorator factory.
+    The patch replaces the factory with one that returns a pass-through decorator
+    which adds specified user info to flask.g.
+
+    Example usage in a test:
+        def test_protected_route(client, mock_auth):
+            # Call mock_auth to get the patcher function, then apply it
+            auth_patcher = mock_auth(user_id="test-user", roles=["admin"])
+            with auth_patcher: # Enter the patch context
+                response = client.get('/protected-route')
+                assert response.status_code == 200
+    """
+
+    def _patch_require_auth_factory(user_id="test-user-id", roles=None, permissions=None):
         if roles is None:
             roles = ["user"]
         if permissions is None:
             permissions = []
-            
+
         mock_user_data = {
             'id': user_id,
-            'username': f"user_{user_id}", # Generate a username
+            'username': f"user_{user_id}", # Synthesize a username
             'roles': roles,
             'permissions': permissions,
-            'auth_type': auth_method
-            # Add other fields if the auth middleware/decorators expect them
+            'auth_type': 'mocked' # Indicate the auth source
         }
-        
-        # Patch flask.g within the app context for the duration of the test
-        # This requires the test to run within the app context, which fixtures like `client` provide.
-        # We patch 'flask.g' which is the typical way to access it.
-        # Using mocker.patch ensures it's automatically cleaned up.
-        patcher = mocker.patch('flask.g', return_value=mocker.MagicMock())
-        g_mock = patcher.start()
-        g_mock.user = mock_user_data
-        g_mock.auth_method = auth_method
-        
-        # Store the patcher to stop it later (pytest might handle this automatically with mocker, but explicit is safer)
-        # If not using mocker fixture, would need to manually call patcher.stop()
-        # pytest.addfinalizer(patcher.stop) # Let pytest handle cleanup if mocker isn't used explicitly
-        
-        return g_mock # Return the mocked g object if needed, or just rely on side effect
 
-    return _mock_user # Return the inner function so tests can call it with params
+        # Define the decorator that the mock factory will return
+        def mock_decorator_inner(f):
+            @wraps(f)
+            def decorated_function(*args, **kwargs):
+                # Ensure flask.g is available (might require request context in test)
+                try:
+                    g.user = mock_user_data # Inject user into g
+                except RuntimeError:
+                    # Handle cases where g might not be available (e.g., setup phase)
+                    # This indicates a potential issue with test setup requiring request context.
+                    print("Warning: flask.g not available when setting mock user. Ensure request context.")
+                    pass # Allow test to potentially proceed, but auth won't be fully mocked
+                return f(*args, **kwargs)
+            return decorated_function
 
+        # Define the mock factory function that replaces the original require_auth
+        def mock_factory(*factory_args, **factory_kwargs):
+            # Ignore any arguments passed to the original factory (like roles)
+            # Always return the same simple decorator
+            return mock_decorator_inner
+
+        # Patch the original factory in the middleware module where it's defined
+        patcher = patch('services.api.middleware.auth_middleware.require_auth', mock_factory)
+        return patcher # Return the patcher object to be used in a 'with' statement
+
+    # Return the function that creates the patcher
+    return _patch_require_auth_factory
+
+# Removed old mock_auth_user fixture
+# @pytest.fixture
+# def mock_auth_user(mocker):
+#    ...
+
+# Removed mock_redis fixture as redis_client provides a functional fake
+# @pytest.fixture
+# def mock_redis(mocker):
+#    ...
+
+# Removed unused celery_config fixture
+# @pytest.fixture(scope='session')
+# def celery_config():
+#    ...
+
+# Keep other fixtures like celery_app if they are used
+
+# Note: The celery_app fixture depends on your app structure.
+# If Celery is initialized within create_app, you might need to adapt.
+# Example assumes a standalone celery_app object might be accessible or needed.
+# If your tasks use app context, ensure the test app context is active.
+
+# @pytest.fixture(scope='session')
+# def celery_app(app): # Assuming celery app is tied to flask app
+#     app.config.update(CELERY_BROKER_URL='memory://', CELERY_RESULT_BACKEND='rpc://')
+#     celery = create_celery(app) # Your celery factory
+#     celery.conf.task_always_eager = True
+#     return celery
 
 # Add other shared fixtures below as needed, e.g., mock services 

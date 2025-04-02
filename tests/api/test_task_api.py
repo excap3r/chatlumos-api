@@ -29,7 +29,7 @@ def test_ask_endpoint_success(mock_send_task, client, app, mock_auth_user):
     # Use the mock_auth_user fixture
     with app.test_request_context(): # Ensure app context for g
         mock_auth_user(user_id=mock_user_id)
-        response = client.post('/api/ask', json={
+        response = client.post('/api/v1/ask', json={
             'question': question_text,
             'pdf_id': pdf_id
         })
@@ -57,7 +57,7 @@ def test_ask_endpoint_success(mock_send_task, client, app, mock_auth_user):
 
 def test_ask_endpoint_unauthenticated(client):
     """Test /api/ask fails without authentication."""
-    response = client.post('/api/ask', json={
+    response = client.post('/api/v1/ask', json={
         'question': 'test',
         'pdf_id': 'test'
     })
@@ -72,14 +72,14 @@ def test_ask_endpoint_bad_input(client, app, mock_auth_user):
     
     with app.test_request_context():
         # Missing pdf_id
-        response_missing_pdf = client.post('/api/ask', json={
+        response_missing_pdf = client.post('/api/v1/ask', json={
             'question': 'test'
         })
         assert response_missing_pdf.status_code == 400
         assert 'Missing required field: pdf_id' in response_missing_pdf.json['error']
         
         # Missing question
-        response_missing_q = client.post('/api/ask', json={
+        response_missing_q = client.post('/api/v1/ask', json={
             'pdf_id': 'test'
         })
         assert response_missing_q.status_code == 400
@@ -113,7 +113,7 @@ def test_pdf_upload_success(mock_send_task, client, app, mock_auth_user):
     with app.test_request_context():
         # Use the mock_auth_user fixture
         mock_auth_user(user_id=mock_user_id)
-        response = client.post('/api/pdf', data=data, content_type='multipart/form-data')
+        response = client.post('/api/v1/pdf', data=data, content_type='multipart/form-data')
 
     assert response.status_code == 202
     assert response.json['task_id'] == expected_task_id
@@ -147,7 +147,7 @@ def test_pdf_upload_unauthenticated(client):
     """Test /api/pdf fails without authentication."""
     from io import BytesIO
     data = {'file': (BytesIO(b"test"), 'test.pdf')}
-    response = client.post('/api/pdf', data=data, content_type='multipart/form-data')
+    response = client.post('/api/v1/pdf', data=data, content_type='multipart/form-data')
     assert response.status_code == 401
 
 def test_pdf_upload_no_file(client, app, mock_auth_user):
@@ -156,7 +156,7 @@ def test_pdf_upload_no_file(client, app, mock_auth_user):
     
     with app.test_request_context():
         mock_auth_user(user_id=mock_user_id)
-        response = client.post('/api/pdf', data={}, content_type='multipart/form-data')
+        response = client.post('/api/v1/pdf', data={}, content_type='multipart/form-data')
     
     assert response.status_code == 400
     assert 'No file part' in response.json['error'] # Adjust expected message
@@ -170,7 +170,7 @@ def test_pdf_upload_no_filename(client, app, mock_auth_user):
     
     with app.test_request_context():
         mock_auth_user(user_id=mock_user_id)
-        response = client.post('/api/pdf', data=data, content_type='multipart/form-data')
+        response = client.post('/api/v1/pdf', data=data, content_type='multipart/form-data')
     
     assert response.status_code == 400
     assert 'No selected file' in response.json['error'] # Adjust expected message
@@ -213,7 +213,7 @@ def test_progress_endpoint_sse_success(mock_redis_pubsub, client, app, mock_auth
     # Use the mock_auth_user fixture
     with app.test_request_context():
         mock_auth_user(user_id=mock_user_id)
-        response = client.get(f'/api/progress/{task_id}', headers={'Accept': 'text/event-stream'})
+        response = client.get(f'/api/v1/progress/{task_id}', headers={'Accept': 'text/event-stream'})
     
     assert response.status_code == 200
     assert response.mimetype == 'text/event-stream'
@@ -238,7 +238,7 @@ def test_progress_endpoint_sse_success(mock_redis_pubsub, client, app, mock_auth
 def test_progress_endpoint_unauthenticated(client):
     """Test /api/progress fails without authentication."""
     task_id = str(uuid.uuid4())
-    response = client.get(f'/api/progress/{task_id}', headers={'Accept': 'text/event-stream'})
+    response = client.get(f'/api/v1/progress/{task_id}', headers={'Accept': 'text/event-stream'})
     assert response.status_code == 401
 
 # TODO: Add test for case where task_id doesn't exist initially (if route checks this)

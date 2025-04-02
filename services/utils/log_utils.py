@@ -10,9 +10,11 @@ import sys
 import json
 import logging
 import time
+import uuid
 from typing import Dict, Any, Optional
-from flask import Request, Response, g
+from flask import Request, Response, g, Flask
 import structlog
+from structlog.contextvars import bind_contextvars, clear_contextvars
 
 # --- structlog configuration ---
 
@@ -130,7 +132,6 @@ def log_request(request: Request) -> None:
     # Log request details as key-value pairs
     log_details = {
         # request_id should be added via contextvars if used
-        "event": "request_received", # Clear event name
         "method": request.method,
         "url": request.url,
         "path": request.path,
@@ -179,7 +180,6 @@ def log_response(response: Response) -> None:
 
     # Log response details
     log_details = {
-        "event": "response_sent",
         # request_id from contextvars
         "status_code": response.status_code,
         "duration_ms": duration_ms,
@@ -206,9 +206,6 @@ def setup_request_logging(app):
     Set up Flask before/after request hooks for logging.
     Requires contextvars setup for request_id.
     """
-    import uuid
-    from structlog.contextvars import bind_contextvars, clear_contextvars
-
     @app.before_request
     def before_request_log():
         # Start context for each request
@@ -217,6 +214,7 @@ def setup_request_logging(app):
         g.request_id = request_id # Keep in g for potential use elsewhere
         bind_contextvars(request_id=request_id) 
         
+        from flask import request # Import request explicitly here
         log_request(request)
 
     @app.after_request

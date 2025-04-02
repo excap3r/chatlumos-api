@@ -12,8 +12,10 @@ from typing import Any
 # Import the Celery app instance
 from celery_app import celery_app # Corrected: Import from root
 from services.config import AppConfig # Added
-from services.llm_service.llm_service import LLMService # Corrected import path
-from services.vector_search.vector_search import VectorSearchService # Corrected import path
+# Corrected import path for LLMService
+from services.llm_service.llm_service import LLMService
+# Corrected import path for VectorSearchService
+from services.vector_search.vector_search import VectorSearchService
 
 # Load env vars at module level for worker
 load_dotenv()

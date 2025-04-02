@@ -12,16 +12,22 @@ import base64 # Added for upload route
 
 # Import middleware and utilities
 # from services.auth_middleware import auth_required # Assuming it can access user context
-from services.api.middleware.auth_middleware import auth_required # Corrected import path
+from services.api.middleware.auth_middleware import require_auth # Corrected import path
 from services.analytics.analytics_middleware import track_specific_event
-from services.analytics.analytics_service import AnalyticsEvent, track_event
+from services.analytics.analytics_service import AnalyticsEvent
 from services.tasks.pdf_processing import process_pdf_task # Import the Celery task
 # from services.utils.api_helpers import allowed_file, get_cache_key, handle_error # handle_error is used
-from services.utils.api_helpers import allowed_file, handle_error # Removed unused get_cache_key
-from services.utils.log_utils import log_request_start, log_request_end
-from services.decorators import rate_limit # Adjusted relative import
+# Removed import of allowed_file as it is defined locally
+# from services.utils.api_helpers import handle_error # Removed unused get_cache_key, allowed_file 
+# Removed unused log_request_start/end import
+# from services.utils.log_utils import log_request_start, log_request_end 
+# Import handle_error from error_utils
+from services.utils.error_utils import APIError, ValidationError, handle_error # Added handle_error import
+# Import rate_limit from api_helpers
+from services.utils.api_helpers import rate_limit 
+# from services.decorators import rate_limit # Adjusted relative import
 from services.config import AppConfig # Added for REDIS_TASK_TTL
-from services.utils.error_utils import APIError, ValidationError
+# from services.utils.error_utils import APIError, ValidationError # Already imported above
 
 pdf_bp = Blueprint('pdf', __name__)
 
@@ -43,8 +49,8 @@ def allowed_file(filename):
 # --- End Removed Route --- 
 
 @pdf_bp.route('/pdf/upload', methods=['POST'])
-@auth_required(level='user') 
-@rate_limit(lambda: current_app.redis_client, limit=5, per=timedelta(minutes=5)) # Verify lambda usage
+@require_auth() 
+@rate_limit(redis_client_provider=lambda: current_app.redis_client, max_calls=5, per_seconds=300) 
 def upload_pdf():
     """
     Upload a PDF document for asynchronous processing via Celery.

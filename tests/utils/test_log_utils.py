@@ -111,7 +111,7 @@ def test_log_request_get(mock_logger_info, mock_time, app):
         # Simulate request_id being set by middleware
         g.request_id = "test-req-id-123"
         
-        log_request(request, logger=test_logger)
+        log_request(request)
         
         assert hasattr(g, 'request_start_time')
         assert g.request_start_time == 12345.6789
@@ -143,7 +143,7 @@ def test_log_request_post_json(mock_logger_info, mock_time, app):
                                 headers={'Authorization': auth_header, 'Content-Type': 'application/json'}, 
                                 base_url="http://localhost"):
         g.request_id = "test-req-id-456"
-        log_request(request, logger=test_logger)
+        log_request(request)
         
         assert hasattr(g, 'request_start_time')
         assert g.request_start_time == 12345.0
@@ -173,7 +173,7 @@ def test_log_request_invalid_json(mock_logger_info, mock_time, app):
                                 content_type='application/json', 
                                 base_url="http://localhost"):
         g.request_id = "test-req-id-789"
-        log_request(request, logger=test_logger)
+        log_request(request)
         
         mock_logger_info.assert_called_once()
         log_message = mock_logger_info.call_args[0][0]
@@ -205,7 +205,7 @@ def test_log_response_json(mock_logger_info, mock_time, app):
         response.status_code = 200
         response.headers['X-Custom-Header'] = 'TestValue'
         
-        log_response(response, logger=test_logger)
+        log_response(response)
         
         mock_logger_info.assert_called_once()
         log_message = mock_logger_info.call_args[0][0]
@@ -239,7 +239,7 @@ def test_log_response_non_json(mock_logger_info, mock_time, app):
             mimetype='text/html'
         )
         
-        log_response(response, logger=test_logger)
+        log_response(response)
         
         mock_logger_info.assert_called_once()
         log_message = mock_logger_info.call_args[0][0]
@@ -267,7 +267,7 @@ def test_log_response_no_start_time(mock_logger_info, mock_time, app):
         response = jsonify({"message": "ok"})
         response.status_code = 200
         
-        log_response(response, logger=test_logger)
+        log_response(response)
         
         mock_logger_info.assert_called_once()
         log_message = mock_logger_info.call_args[0][0]

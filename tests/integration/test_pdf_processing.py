@@ -21,8 +21,8 @@ def test_pdf_processing_integration(client, app, configured_celery_app, redis_cl
     # These mocks ensure the test focuses on the integration, not external systems.
     
     # Example: Mocking vector search interactions if process_pdf_task uses it
-    with patch('services.vector_search.vector_search.add_document', return_value=True) as mock_add_doc, \
-         patch('services.pdf_processor.pdf_processor.extract_text', return_value="Extracted text content.") as mock_extract_text:
+    with patch('services.tasks.pdf_processing.VectorSearchService.add_documents', return_value=True) as mock_add_doc, \
+         patch('services.pdf_processor.pdf_processor.PDFProcessor.extract_text', return_value="Extracted text content.") as mock_extract_text:
         
         # --- Step 2: Authenticate the Request ---
         # We need a way to simulate an authenticated user for the API call.
@@ -94,10 +94,10 @@ def test_pdf_processing_integration_task_error(client, app, configured_celery_ap
     task_id = None
 
     # --- Step 1: Mock Dependencies to Simulate Failure ---
-    # Simulate vector_search.add_document raising an exception
+    # Simulate vector_search.add_documents raising an exception
     simulated_error_message = "Vector DB connection failed"
-    with patch('services.vector_search.vector_search.add_document', side_effect=Exception(simulated_error_message)) as mock_add_doc, \
-         patch('services.pdf_processor.pdf_processor.extract_text', return_value="Some text") as mock_extract_text:
+    with patch('services.tasks.pdf_processing.VectorSearchService.add_documents', side_effect=Exception(simulated_error_message)) as mock_add_doc, \
+         patch('services.pdf_processor.pdf_processor.PDFProcessor.extract_text', return_value="Some text") as mock_extract_text:
         
         # --- Step 2: Authenticate ---
         with patch('services.api.middleware.auth_middleware.require_auth') as mock_require_auth:
@@ -152,8 +152,8 @@ def test_ask_processing_integration(client, app, configured_celery_app, redis_cl
 
     # --- Step 1: Mock External Dependencies (within the task) ---
     # Mock vector search query and LLM call used by process_question_task
-    with patch('services.vector_search.vector_search.query', return_value=mock_context) as mock_vector_query, \
-         patch('services.llm_service.llm_service.generate_answer', return_value=mock_answer) as mock_llm_call:
+    with patch('services.tasks.question_processing.VectorSearchService.query', return_value=mock_context) as mock_vector_query, \
+         patch('services.tasks.question_processing.LLMService.generate_answer', return_value=mock_answer) as mock_llm_call:
 
         # --- Step 2: Authenticate ---
         with patch('services.api.middleware.auth_middleware.require_auth') as mock_require_auth:

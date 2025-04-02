@@ -132,9 +132,12 @@ def decode_token(token: str) -> Optional[Dict[str, Any]]:
         token: JWT token string.
 
     Returns:
-        Dictionary containing token payload if valid, otherwise None.
+        Dictionary containing token payload if valid.
 
     Raises:
+        MissingSecretError: If JWT secret is not configured.
+        ExpiredTokenError: If the token has expired.
+        InvalidTokenError: If the token is invalid for any other reason.
         RuntimeError: If called outside of an active Flask application context.
     """
     if not current_app:
@@ -145,11 +148,9 @@ def decode_token(token: str) -> Optional[Dict[str, Any]]:
 
     if not secret_key:
         logger.error("JWT_SECRET_KEY not found in Flask app config during decode.")
-        # Treat missing secret as an invalid token scenario for security
-        # Raise an error instead of returning None, as this is a config issue
         raise MissingSecretError("JWT secret key is not configured.")
 
-    # Default options for jwt.decode
+    # Options for jwt.decode, including default leeway for clock skew
     decode_options = {
         "verify_signature": True,
         "verify_exp": True,
@@ -160,32 +161,35 @@ def decode_token(token: str) -> Optional[Dict[str, Any]]:
     }
 
     try:
-        # The leeway option accounts for clock skew between servers
-        # Decode *without* expiry verification first to check invalidation list
+        # Let jwt.decode handle expiry verification with leeway
         payload = jwt.decode(
             token,
             secret_key,
             algorithms=[algorithm],
-            leeway=10, # Allow 10 seconds clock skew
-            options={"verify_exp": False} # Decode even if expired initially
+            leeway=current_app.config.get('JWT_LEEWAY', 10), # Use config or default leeway
+            options=decode_options
         )
 
-        # Check if the token jti is in the invalidation list (implementation in the caller)
-        # Now verify expiration manually if required
-        if decode_options["verify_exp"] and payload['exp'] < time.time() - 10: # Apply leeway
-             raise jwt.ExpiredSignatureError("Token has expired")
+        # Optional: Add check here for invalidated tokens (e.g., check JTI against a denylist)
+        # if is_token_invalidated(payload.get('jti')):
+        #     raise InvalidTokenError("Token has been invalidated.")
 
         logger.debug("JWT token decoded successfully", user_id=payload.get('sub'), jti=payload.get('jti'))
         return payload
 
     except jwt.ExpiredSignatureError:
-        logger.warning("Attempted to use expired JWT token", jti=jwt.get_unverified_header(token).get('jti', 'unknown'))
+        # Log JTI if possible, even from expired token header
+        try:
+            unverified_header = jwt.get_unverified_header(token)
+            jti = unverified_header.get('jti', 'unknown')
+        except Exception:
+            jti = 'unknown'
+        logger.warning("Attempted to use expired JWT token", jti=jti)
         raise ExpiredTokenError("Token has expired")
     except jwt.InvalidTokenError as e:
         logger.warning("Invalid JWT token provided", error=str(e))
         raise InvalidTokenError(f"Token is invalid: {e}")
     except Exception as e:
-        # Log unexpected errors but raise a generic invalid token error
         logger.error("Unexpected error decoding JWT token", error=str(e), exc_info=True)
         raise InvalidTokenError("Failed to decode token due to an unexpected error.")
 

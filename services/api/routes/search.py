@@ -4,7 +4,9 @@ from flask import Blueprint, request, jsonify, current_app
 from services.utils.api_helpers import rate_limit, cache_result
 from services.analytics.analytics_middleware import track_specific_event
 from services.analytics.analytics_service import AnalyticsEvent
-from services.utils.error_utils import APIError, ValidationError, ServiceError
+# Corrected ServiceError import path
+from services.utils.error_utils import APIError, ValidationError 
+from services.api_gateway import ServiceError # Import ServiceError from gateway
 from services.config import AppConfig
 # Import auth decorator
 from services.api.middleware.auth_middleware import require_auth
