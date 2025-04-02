@@ -4,10 +4,11 @@ from unittest.mock import patch, MagicMock
 import uuid
 from functools import wraps
 from services.user_service import register_new_user, login_user # Assume user service import
-
+from datetime import datetime
 # Import custom exceptions needed for testing side effects
 from services.db.exceptions import UserAlreadyExistsError, InvalidCredentialsError
-# (Assuming these are the correct paths; adjust if needed)
+# Import data models
+from services.models.api_key import APIKeyData, APIKeyDataWithSecret
 
 # Assuming client fixture and mock_auth fixture are available from conftest.py
 
@@ -149,20 +150,25 @@ def test_login_bad_input(mock_login_service, client):
 # --- API Key Tests (Using mock_auth fixture) --- 
 
 @patch('services.db.user_db.get_user_api_keys') 
-def test_get_api_keys_success(mock_get_keys, client, mock_auth):
-    """Test successfully retrieving API keys using mock_auth fixture."""
-    mock_user_id = str(uuid.uuid4())
-    mock_keys = [ {'id': str(uuid.uuid4()), 'name': 'key1'}, {'id': str(uuid.uuid4()), 'name': 'key2'} ] 
-    mock_get_keys.return_value = mock_keys
-    
-    # Use the mock_auth fixture
-    auth_patcher = mock_auth(user_id=mock_user_id)
-    with auth_patcher: # Apply the patch context
-        response = client.get('/api/v1/auth/keys') 
+def test_get_api_keys_success(mock_get_keys, client, mock_auth, mocker):
+    """Test successfully retrieving API keys for an authenticated user."""
+    mock_user_id = "user_with_keys"
+    # Mock the database call
+    mock_db_keys = [
+        APIKeyData(key_id="key1", user_id=mock_user_id, name="Key One", created_at=datetime.utcnow(), last_used_at=None, is_active=True),
+        APIKeyData(key_id="key2", user_id=mock_user_id, name="Key Two", created_at=datetime.utcnow(), last_used_at=datetime.utcnow(), is_active=True)
+    ]
+    mocker.patch('services.api.routes.auth.list_api_keys_for_user', return_value=mock_db_keys)
 
-        assert response.status_code == 200
-        assert len(response.json) == len(mock_keys)
-        mock_get_keys.assert_called_once_with(user_id=mock_user_id)
+    # Use the mock_auth factory
+    with mock_auth(user_id=mock_user_id):
+        response = client.get('/api/v1/auth/api-keys')
+
+    assert response.status_code == 200
+    assert len(response.json) == 2
+    assert response.json[0]['name'] == "Key One"
+    assert 'key_prefix' in response.json[0] # Should only contain prefix
+    assert 'full_key' not in response.json[0]
 
 def test_get_api_keys_unauthenticated(client):
     """Test retrieving API keys fails without authentication."""
@@ -180,33 +186,42 @@ def test_get_api_keys_unauthenticated(client):
 #     pass 
 
 @patch('services.db.user_db.create_api_key') 
-def test_create_api_key_success(mock_create_key, client, mock_auth):
-    """Test successfully creating an API key using mock_auth fixture."""
-    mock_user_id = str(uuid.uuid4())
-    key_name = "My Test Key"
-    mock_key_details = {'id': str(uuid.uuid4()), 'api_key': f"test_key_{uuid.uuid4()}"}
-    mock_create_key.return_value = mock_key_details
+def test_create_api_key_success(mock_create_key, client, mock_auth, mocker):
+    """Test successfully creating a new API key."""
+    mock_user_id = "create-key-user"
+    key_name = "My New Test Key"
+    # Mock the DB function to return the key details including the full key
+    mock_full_key = "testprefix_testsecretkeyvalue"
+    mock_created_key = APIKeyDataWithSecret(
+        key_id="newkey123",
+        user_id=mock_user_id,
+        name=key_name,
+        created_at=datetime.utcnow(),
+        last_used_at=None,
+        is_active=True,
+        key_prefix="testprefix",
+        hashed_key="hashed_secret", # Not returned in API, but stored
+        full_key=mock_full_key # Returned only on creation
+    )
+    mock_create_key.return_value = mock_created_key
 
-    # Use the mock_auth fixture
-    auth_patcher = mock_auth(user_id=mock_user_id)
-    with auth_patcher:
-        response = client.post('/api/v1/auth/keys', json={'name': key_name})
+    with mock_auth(user_id=mock_user_id):
+        response = client.post('/api/v1/auth/api-keys', json={'name': key_name})
 
-        assert response.status_code == 201
-        data = response.json
-        assert data['id'] == mock_key_details['id']
-        assert data['name'] == key_name
-        assert data['api_key'] == mock_key_details['api_key'] 
-        mock_create_key.assert_called_once_with(user_id=mock_user_id, name=key_name)
+    assert response.status_code == 201
+    assert response.json['name'] == key_name
+    assert response.json['key_id'] == "newkey123"
+    assert response.json['key_prefix'] == "testprefix"
+    assert response.json['full_key'] == mock_full_key # Verify full key is returned
+    mock_create_key.assert_called_once_with(user_id=mock_user_id, name=key_name)
 
 
-def test_create_api_key_bad_input(client, mock_auth):
-    """Test creating API key fails with missing name (auth mocked)."""
-    auth_patcher = mock_auth(user_id="some-user-id")
-    with auth_patcher:
-        response = client.post('/api/v1/auth/keys', json={}) # Missing 'name'
-        assert response.status_code == 400
-        assert 'error' in response.json
+def test_create_api_key_bad_input(client, mock_auth, mocker):
+    """Test API key creation fails with missing name."""
+    with mock_auth(): # Default user
+        response = client.post('/api/v1/auth/api-keys', json={}) # Missing 'name'
+    assert response.status_code == 400
+    assert 'error' in response.json
 
 
 def test_create_api_key_unauthenticated(client):
@@ -224,41 +239,39 @@ def test_create_api_key_unauthenticated(client):
 #     pass 
 
 @patch('services.db.user_db.revoke_api_key') 
-def test_delete_api_key_success(mock_revoke_key, client, mock_auth):
-    """Test successfully deleting an API key using mock_auth fixture."""
-    mock_user_id = str(uuid.uuid4())
-    key_id_to_delete = str(uuid.uuid4())
-    mock_revoke_key.return_value = True
+def test_delete_api_key_success(mock_revoke_key, client, mock_auth, mocker):
+    """Test successfully deleting an API key."""
+    mock_user_id = "delete-key-user"
+    key_id_to_delete = "key_to_go"
+    # Mock the DB function - Correct the target path
+    mock_delete = mocker.patch('services.api.auth_routes.delete_api_key_for_user', return_value=True)
 
-    # Use mock_auth fixture
-    auth_patcher = mock_auth(user_id=mock_user_id)
-    with auth_patcher:
-        response = client.delete(f'/api/v1/auth/keys/{key_id_to_delete}')
+    with mock_auth(user_id=mock_user_id):
+        response = client.delete(f'/api/v1/auth/api-keys/{key_id_to_delete}')
 
-        assert response.status_code == 204
-        # Check revoke_api_key was called with key_id and the mocked user_id
-        mock_revoke_key.assert_called_once_with(key_id=key_id_to_delete, user_id=mock_user_id)
+    assert response.status_code == 204 # No content on successful deletion
+    # Verify the correct function was called with user_id and key_id
+    mock_delete.assert_called_once_with(user_id=mock_user_id, key_id=key_id_to_delete)
 
 @patch('services.db.user_db.revoke_api_key')
-def test_delete_api_key_not_found(mock_revoke_key, client, mock_auth):
-    """Test deleting a non-existent API key using mock_auth fixture."""
-    mock_user_id = str(uuid.uuid4())
-    key_id_to_delete = str(uuid.uuid4())
-    mock_revoke_key.return_value = False
+def test_delete_api_key_not_found(mock_revoke_key, client, mock_auth, mocker):
+    """Test deleting a non-existent or unauthorized API key."""
+    mock_user_id = "delete-key-user-fail"
+    non_existent_key_id = "key_does_not_exist"
+    # Mock the DB function to indicate failure - Correct the target path
+    mock_delete = mocker.patch('services.api.auth_routes.delete_api_key_for_user', return_value=False)
 
-    # Use mock_auth fixture
-    auth_patcher = mock_auth(user_id=mock_user_id)
-    with auth_patcher:
-        response = client.delete(f'/api/v1/auth/keys/{key_id_to_delete}')
+    with mock_auth(user_id=mock_user_id):
+        response = client.delete(f'/api/v1/auth/api-keys/{non_existent_key_id}')
 
-        assert response.status_code == 404
-        mock_revoke_key.assert_called_once_with(key_id=key_id_to_delete, user_id=mock_user_id)
+    assert response.status_code == 404 # Not Found
+    mock_delete.assert_called_once_with(user_id=mock_user_id, key_id=non_existent_key_id)
 
 
 def test_delete_api_key_unauthenticated(client):
-    """Test deleting an API key fails without authentication."""
-    mock_key_id = str(uuid.uuid4())
-    response = client.delete(f'/api/v1/auth/keys/{mock_key_id}')
+    """Test deleting API key fails without authentication."""
+    key_id_to_delete = str(uuid.uuid4())
+    response = client.delete(f'/api/v1/auth/keys/{key_id_to_delete}')
     assert response.status_code == 401
     assert 'error' in response.json
 
@@ -271,31 +284,26 @@ def test_delete_api_key_unauthenticated(client):
 
 # --- Token Validation Test (Using mock_auth fixture) --- 
 
-def test_validate_token_success(client, mock_auth):
+def test_validate_token_success(client, mock_auth, mocker):
     """Test successfully validating a token using mock_auth fixture."""
     mock_user_info = {
-        'id': str(uuid.uuid4()),
+        'id': str(uuid.uuid4()), 
         'username': 'validateduser',
         'roles': ['user', 'reader'],
         'auth_type': 'mocked'
     }
     
-    # Use the mock_auth fixture
-    auth_patcher = mock_auth(
-        user_id=mock_user_info['id'], 
-        roles=mock_user_info['roles']
-    )
-    with auth_patcher:
+    with mock_auth(user_id=mock_user_info['id'], roles=mock_user_info['roles']):
         response = client.get('/api/v1/auth/validate')
-            
-        assert response.status_code == 200
-        data = response.json
-        assert data['user_id'] == mock_user_info['id']
-        assert data['username'] == mock_user_info['username']
-        assert data['roles'] == mock_user_info['roles']
+
+    assert response.status_code == 200
+    data = response.json
+    assert data['id'] == mock_user_info['id']
+    assert data['username'] == f"user_{mock_user_info['id']}" # Verify synthesized username
+    assert data['roles'] == mock_user_info['roles']
 
 def test_validate_token_unauthenticated(client):
-    """Test /validate fails without authentication."""
+    """Test validating token fails without authentication."""
     response = client.get('/api/v1/auth/validate')
     assert response.status_code == 401
     assert 'error' in response.json

@@ -3,10 +3,19 @@ import fakeredis
 from app import create_app # Assuming your Flask app factory is here
 from celery_app import celery_app # Import celery instance
 from unittest.mock import patch, MagicMock
-from flask import Flask, g
+from flask import Flask, g, current_app
 from functools import wraps # Added for wraps
 # from services.config import TestingConfig # REMOVED import
 import os
+import uuid
+import time
+import logging
+import json
+from io import BytesIO
+from celery import Celery
+from services.utils.log_utils import setup_logger # For logger fixture
+# Import the actual decorator to be wrapped/patched
+from services.api.middleware.auth_middleware import require_auth
 
 # Removed global mock helpers - rely on fixture again
 # def mock_pass_through_decorator(f): ...
@@ -56,63 +65,66 @@ def app():
 
 # --- Restore mock_auth fixture --- 
 @pytest.fixture
-def mock_auth():
-    """Fixture to mock the @require_auth decorator factory.
+def mock_auth(mocker):
+    """Provides a context manager to mock authentication for a test request."""
 
-    Returns a function that, when called, patches the decorator factory.
-    The patch replaces the factory with one that returns a pass-through decorator
-    which adds specified user info to flask.g.
+    # Modify the AuthContextManager to accept mocker as the first argument
+    class AuthContextManager:
+        def __init__(self, mocker_fixture, user_id=None, username=None, roles=None):
+            self.mocker = mocker_fixture
+            self.user_id = user_id or "test-user-id"
+            self.username = username or "testuser"
+            self.roles = roles or ["user"]
+            self.mock_user_data = {
+                "id": self.user_id,
+                "username": self.username,
+                "roles": self.roles,
+            }
+            self.patcher = None # Initialize patcher
 
-    Example usage in a test:
-        def test_protected_route(client, mock_auth):
-            auth_patcher = mock_auth(user_id="test-user", roles=["admin"])
-            with auth_patcher: # Enter the patch context
-                response = client.get('/protected-route')
-                assert response.status_code == 200
-    """
+        def __enter__(self):
+            # --- REVISED STRATEGY: Patch the DECORATOR FUNCTION ITSELF ---
+            @wraps(require_auth)
+            def mock_decorator_factory(*factory_args, **factory_kwargs):
+                def mock_decorator_inner(f):
+                    @wraps(f)
+                    def decorated_function(*args, **kwargs):
+                        g.user = self.mock_user_data
+                        g.auth_method = 'mocked'
+                        current_app.logger.debug("Mock auth applied", user=g.user)
+                        return f(*args, **kwargs)
+                    return decorated_function
+                return mock_decorator_inner
 
-    def _patch_require_auth_factory(user_id="test-user-id", roles=None, permissions=None):
-        if roles is None:
-            roles = ["user"]
-        if permissions is None:
-            permissions = []
+            # Use the passed-in mocker fixture
+            self.patcher = self.mocker.patch(
+                'services.api.middleware.auth_middleware.require_auth',
+                new=mock_decorator_factory
+            )
+            self.patcher.start()
+            return self
 
-        mock_user_data = {
-            'id': user_id,
-            'username': f"user_{user_id}", # Synthesize a username
-            'roles': roles,
-            'permissions': permissions,
-            'auth_type': 'mocked' # Indicate the auth source
-        }
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            if self.patcher:
+                self.patcher.stop()
 
-        # Define the decorator that the mock factory will return
-        def mock_decorator_inner(f):
-            @wraps(f)
-            def decorated_function(*args, **kwargs):
-                try:
-                    g.user = mock_user_data # Inject user into g
-                except RuntimeError:
-                    print("Warning: flask.g not available when setting mock user. Ensure request context.")
-                    pass 
-                return f(*args, **kwargs)
-            return decorated_function
+    # The fixture now returns a *function* that creates an instance of the context manager,
+    # passing the mocker fixture along.
+    def _context_manager_factory(**kwargs):
+        return AuthContextManager(mocker, **kwargs)
 
-        # Define the mock factory function that replaces the original require_auth
-        def mock_factory(*factory_args, **factory_kwargs):
-            # Return the simple decorator, ignoring original factory args
-            return mock_decorator_inner
-
-        # Patch the original factory where it's defined
-        patcher = patch('services.api.middleware.auth_middleware.require_auth', mock_factory)
-        return patcher # Return the patcher object to be used in a 'with' statement
-
-    # Return the function that creates the patcher
-    return _patch_require_auth_factory
+    return _context_manager_factory
 
 @pytest.fixture()
 def client(app: Flask):
     """A test client for the app."""
     return app.test_client()
+
+@pytest.fixture
+def request_context(app: Flask):
+    """Fixture to provide request context for each test."""
+    with app.test_request_context():
+        yield
 
 @pytest.fixture
 def runner(app: Flask):

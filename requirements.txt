@@ -16,21 +16,22 @@ tiktoken==0.4.0 # Optional but recommended for token counting
 
 # Vector Database
 pinecone==6.0.2
-torch==2.3.0
+torch==2.6.0
 sentence-transformers==2.7.0
+annoy==1.17.3  # Alternative to faiss-cpu for vector similarity search
 
 # Translation & Language
 deep-translator==1.10.1
 
 # API Server & Framework
-Flask==3.0.3
+Flask==2.3.3  # Downgraded for pytest-flask compatibility
 Flask-Cors==4.0.1
-Werkzeug==3.0.3
+Werkzeug==2.3.7  # Match Flask version
 gunicorn==20.1.0
 gevent==24.2.1 # For Gunicorn worker type
 
 # Input Validation
-pydantic==2.7.4 # Added for robust input validation
+pydantic # Added for robust input validation
 
 # Caching
 redis==5.0.4
@@ -47,7 +48,7 @@ pytest==8.2.2
 pytest-mock==3.14.0
 pytest-cov==4.0.0
 pytest-asyncio==0.20.0
-pytest-flask==1.2.0
+pytest-flask==1.2.0  # Fixed version for Flask 2.x
 
 # Test Utilities
 fakeredis[json]==2.24.0 # Use [json] extra for JSON command support
@@ -60,12 +61,12 @@ mkdocs
 mkdocstrings
 mkdocstrings-python
 
-# Added for webhook SSRF protection
-ssrf-filter
-
 # Added for async event loop optimization
 uvloop
 uvicorn
 
 # Added Swagger UI
-flask-swagger-ui==5.11 
+flask-swagger-ui==4.11.1
+
+# ML models
+transformers 

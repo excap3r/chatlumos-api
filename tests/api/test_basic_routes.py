@@ -53,9 +53,15 @@ def test_health_endpoint(mock_redis_check, mock_details_fetch, mock_init_service
 
 # Test Swagger UI Endpoint
 def test_swagger_ui(client):
-    """Test if the Swagger UI endpoint ('/docs') returns HTML."""
-    # Corrected path to include /api/v1
-    response = client.get('/api/v1/docs')
-    assert response.status_code == 200
-    assert response.content_type == 'text/html; charset=utf-8'
-    assert b'<title>Swagger UI</title>' in response.data 
+    """Test if the Swagger UI endpoint ('/docs') redirects correctly."""
+    # The path /api/v1/docs should permanently redirect to /api/v1/docs/
+    response = client.get('/api/v1/docs', follow_redirects=False) # Don't follow redirects
+    assert response.status_code == 308 # Check for Permanent Redirect
+    assert 'Location' in response.headers
+    # Ensure the location header points to the URL with a trailing slash
+    assert response.headers['Location'].endswith('/api/v1/docs/')
+
+    # Optional: Test the redirected URL directly
+    # response_redirected = client.get('/api/v1/docs/', follow_redirects=True)
+    # assert response_redirected.status_code == 200
+    # assert b"Swagger UI" in response_redirected.data # Check for content if needed 

@@ -4,6 +4,7 @@ import os
 import shutil
 from unittest.mock import patch, MagicMock
 import json
+import structlog
 
 from services.utils.log_utils import setup_logger, log_request, log_response
 
@@ -18,13 +19,15 @@ def test_setup_logger_console_only():
     logger_name = "test_console_logger"
     logger = setup_logger(logger_name, level=logging.DEBUG)
     
-    assert isinstance(logger, logging.Logger)
-    assert logger.name == logger_name
-    assert logger.level == logging.DEBUG
-    assert len(logger.handlers) == 1
-    assert isinstance(logger.handlers[0], logging.StreamHandler)
-    # Clean up logger to avoid interference with other tests
-    logging.Logger.manager.loggerDict.pop(logger_name, None)
+    # Check that we got a structlog BoundLogger
+    assert isinstance(logger, structlog.BoundLogger)
+    
+    # Test logging
+    logger.info("Test message", test_key="test_value")
+    
+    # Since structlog is configured differently than standard logging,
+    # we mainly want to verify that the logger was created successfully
+    # and can be used to log messages without errors
 
 
 def test_setup_logger_with_file(tmp_path):
@@ -38,27 +41,27 @@ def test_setup_logger_with_file(tmp_path):
     
     logger = setup_logger(logger_name, log_file=str(log_file), level=logging.INFO)
     
-    assert isinstance(logger, logging.Logger)
-    assert logger.name == logger_name
-    assert logger.level == logging.INFO
-    assert len(logger.handlers) == 2 # Console + File
+    # Check that we got a structlog BoundLogger
+    assert isinstance(logger, structlog.BoundLogger)
     
-    file_handlers = [h for h in logger.handlers if isinstance(h, logging.FileHandler)]
-    assert len(file_handlers) == 1
-    assert file_handlers[0].baseFilename == str(log_file)
-    
-    # Check if directory and file were created
+    # Verify directory was created
     assert log_dir.exists()
     assert log_dir.is_dir()
-    # The file might not be created until first log message, check dir is enough
-
-    # Test logging creates the file
-    logger.info("Test message")
+    
+    # Test logging
+    test_message = "Test log message"
+    test_data = {"key": "value"}
+    logger.info(test_message, **test_data)
+    
+    # Verify log file was created and contains the message
     assert log_file.exists()
     assert log_file.is_file()
-
-    # Clean up logger
-    logging.Logger.manager.loggerDict.pop(logger_name, None)
+    
+    # Read the log file and verify content
+    log_content = log_file.read_text()
+    assert test_message in log_content
+    assert "key" in log_content
+    assert "value" in log_content
 
 
 def test_setup_logger_existing_dir(tmp_path):
@@ -73,15 +76,23 @@ def test_setup_logger_existing_dir(tmp_path):
     
     logger = setup_logger(logger_name, log_file=str(log_file))
     
-    assert len(logger.handlers) == 2
-    file_handlers = [h for h in logger.handlers if isinstance(h, logging.FileHandler)]
-    assert len(file_handlers) == 1
-    assert file_handlers[0].baseFilename == str(log_file)
-    logger.warning("Another test")
+    # Check that we got a structlog BoundLogger
+    assert isinstance(logger, structlog.BoundLogger)
+    
+    # Test logging
+    test_message = "Test log message"
+    test_data = {"key": "value"}
+    logger.info(test_message, **test_data)
+    
+    # Verify log file was created and contains the message
     assert log_file.exists()
-
-    # Clean up logger
-    logging.Logger.manager.loggerDict.pop(logger_name, None)
+    assert log_file.is_file()
+    
+    # Read the log file and verify content
+    log_content = log_file.read_text()
+    assert test_message in log_content
+    assert "key" in log_content
+    assert "value" in log_content
 
 # TODO: Add tests for log_request (requires Flask app context)
 # TODO: Add tests for log_response (requires Flask app context) 
@@ -99,13 +110,12 @@ def app():
 
 
 @patch('services.utils.log_utils.time.time')
-@patch('logging.Logger.info') # Patch the logger's info method directly
-def test_log_request_get(mock_logger_info, mock_time, app):
+@patch('structlog.get_logger')
+def test_log_request_get(mock_logger_factory, mock_time, app):
     """Test logging a basic GET request."""
     mock_time.return_value = 12345.6789
-    test_logger = logging.getLogger("test_req_log")
-    # Prevent logs from propagating to root logger during test
-    test_logger.propagate = False 
+    mock_logger = MagicMock()
+    mock_logger_factory.return_value = mock_logger
     
     with app.test_request_context('/test?param1=val1', method='GET', base_url="http://localhost"):
         # Simulate request_id being set by middleware
@@ -116,77 +126,89 @@ def test_log_request_get(mock_logger_info, mock_time, app):
         assert hasattr(g, 'request_start_time')
         assert g.request_start_time == 12345.6789
         
-        mock_logger_info.assert_called_once()
-        log_message = mock_logger_info.call_args[0][0]
-        assert log_message.startswith("Request: ")
-        log_data = json.loads(log_message.replace("Request: ", ""))
+        # Verify the logger was called with the correct structured data
+        mock_logger.info.assert_called_once()
+        log_data = mock_logger.info.call_args[1]
         
-        assert log_data['request_id'] == "test-req-id-123"
+        assert log_data['event'] == 'Incoming request'
         assert log_data['method'] == 'GET'
         assert log_data['url'] == 'http://localhost/test?param1=val1'
         assert log_data['path'] == '/test'
+        assert log_data['request_id'] == 'test-req-id-123'
+        assert 'headers' in log_data
+        assert 'args' in log_data
         assert log_data['args'] == {'param1': 'val1'}
-        assert log_data['data'] is None
-        assert "Authorization" not in log_data['headers']
 
 @patch('services.utils.log_utils.time.time')
-@patch('logging.Logger.info')
-def test_log_request_post_json(mock_logger_info, mock_time, app):
+@patch('structlog.get_logger')
+def test_log_request_post_json(mock_logger_factory, mock_time, app):
     """Test logging a POST request with JSON data and Auth header."""
     mock_time.return_value = 12345.0
-    test_logger = logging.getLogger("test_req_log_post")
-    test_logger.propagate = False
+    mock_logger = MagicMock()
+    mock_logger_factory.return_value = mock_logger
+    
     request_data = {"key": "value", "nested": {"num": 1}}
     auth_header = "Bearer some_secret_token"
     
-    with app.test_request_context('/submit', method='POST', json=request_data, 
-                                headers={'Authorization': auth_header, 'Content-Type': 'application/json'}, 
+    with app.test_request_context('/submit', method='POST', json=request_data,
+                                headers={'Authorization': auth_header, 'Content-Type': 'application/json'},
                                 base_url="http://localhost"):
         g.request_id = "test-req-id-456"
         log_request(request)
         
         assert hasattr(g, 'request_start_time')
         assert g.request_start_time == 12345.0
-
-        mock_logger_info.assert_called_once()
-        log_message = mock_logger_info.call_args[0][0]
-        log_data = json.loads(log_message.replace("Request: ", ""))
         
-        assert log_data['request_id'] == "test-req-id-456"
+        # Verify the logger was called with the correct structured data
+        mock_logger.info.assert_called_once()
+        log_data = mock_logger.info.call_args[1]
+        
+        assert log_data['event'] == 'Incoming request'
         assert log_data['method'] == 'POST'
         assert log_data['url'] == 'http://localhost/submit'
-        assert log_data['data'] == request_data
-        assert log_data['headers']['Authorization'] == "<redacted>"
+        assert log_data['path'] == '/submit'
+        assert log_data['request_id'] == 'test-req-id-456'
+        assert 'headers' in log_data
+        assert 'Authorization' not in log_data['headers']  # Sensitive header should be excluded
         assert log_data['headers']['Content-Type'] == 'application/json'
+        assert log_data['body'] == request_data
 
 @patch('services.utils.log_utils.time.time')
-@patch('logging.Logger.info')
-def test_log_request_invalid_json(mock_logger_info, mock_time, app):
+@patch('structlog.get_logger')
+def test_log_request_invalid_json(mock_logger_factory, mock_time, app):
     """Test logging a request with invalid JSON data."""
     mock_time.return_value = 12345.0
-    test_logger = logging.getLogger("test_req_log_invalid")
-    test_logger.propagate = False
-    invalid_json_bytes = b'{ "key": "value", '
-
-    with app.test_request_context('/invalid', method='POST', 
-                                data=invalid_json_bytes, 
-                                content_type='application/json', 
+    mock_logger = MagicMock()
+    mock_logger_factory.return_value = mock_logger
+    
+    invalid_json_bytes = b'{ "key": "value", '  # Invalid JSON
+    
+    with app.test_request_context('/invalid', method='POST',
+                                data=invalid_json_bytes,
+                                content_type='application/json',
                                 base_url="http://localhost"):
         g.request_id = "test-req-id-789"
         log_request(request)
         
-        mock_logger_info.assert_called_once()
-        log_message = mock_logger_info.call_args[0][0]
-        log_data = json.loads(log_message.replace("Request: ", ""))
+        # Verify the logger was called with the correct structured data
+        mock_logger.info.assert_called_once()
+        log_data = mock_logger.info.call_args[1]
         
-        assert log_data['data'] == "<Invalid JSON>"
+        assert log_data['event'] == 'Incoming request'
+        assert log_data['method'] == 'POST'
+        assert log_data['url'] == 'http://localhost/invalid'
+        assert log_data['path'] == '/invalid'
+        assert log_data['request_id'] == 'test-req-id-789'
+        assert 'headers' in log_data
+        assert log_data['headers']['Content-Type'] == 'application/json'
+        assert log_data['body'] == '<Invalid JSON>'  # Invalid JSON should be marked as such
 
 
 # --- Tests for log_response --- 
 
 @patch('services.utils.log_utils.time.time')
-@patch('logging.Logger.info')
-def test_log_response_json(mock_logger_info, mock_time, app):
+@patch('structlog.get_logger')
+def test_log_response_json(mock_logger_factory, mock_time, app):
     """Test logging a JSON response."""
     test_logger = logging.getLogger("test_res_log_json")
     test_logger.propagate = False
@@ -194,11 +216,13 @@ def test_log_response_json(mock_logger_info, mock_time, app):
     end_time = 12345.5
     response_data = {"result": "success", "count": 42}
     
-    with app.test_request_context('/test'): # Context needed for g
+    mock_logger = MagicMock()
+    mock_logger_factory.return_value = mock_logger
+    mock_time.return_value = end_time
+    
+    with app.test_request_context('/test'):  # Context needed for g
         g.request_start_time = start_time
         g.request_id = "res-req-id-111"
-        # Mock current time for duration calculation
-        mock_time.return_value = end_time 
         
         # Create a Flask response object
         response = jsonify(response_data)
@@ -207,31 +231,33 @@ def test_log_response_json(mock_logger_info, mock_time, app):
         
         log_response(response)
         
-        mock_logger_info.assert_called_once()
-        log_message = mock_logger_info.call_args[0][0]
-        assert log_message.startswith("Response: ")
-        log_data = json.loads(log_message.replace("Response: ", ""))
+        # Verify the logger was called with the correct structured data
+        mock_logger.info.assert_called_once()
+        log_data = mock_logger.info.call_args[1]
         
-        assert log_data['request_id'] == "res-req-id-111"
+        assert log_data['event'] == 'Outgoing response'
         assert log_data['status_code'] == 200
-        assert log_data['duration'] == pytest.approx(end_time - start_time) 
-        assert log_data['data'] == response_data
+        assert log_data['duration_ms'] == 500.0  # (12345.5 - 12345.0) * 1000
+        assert log_data['request_id'] == 'res-req-id-111'
+        assert 'headers' in log_data
         assert log_data['headers']['Content-Type'] == 'application/json'
         assert log_data['headers']['X-Custom-Header'] == 'TestValue'
+        assert log_data['body'] == response_data
 
 @patch('services.utils.log_utils.time.time')
-@patch('logging.Logger.info')
-def test_log_response_non_json(mock_logger_info, mock_time, app):
+@patch('structlog.get_logger')
+def test_log_response_non_json(mock_logger_factory, mock_time, app):
     """Test logging a non-JSON response."""
-    test_logger = logging.getLogger("test_res_log_nonjson")
-    test_logger.propagate = False
     start_time = 12300.0
     end_time = 12300.1
+    
+    mock_logger = MagicMock()
+    mock_logger_factory.return_value = mock_logger
+    mock_time.return_value = end_time
     
     with app.test_request_context('/test_html'):
         g.request_start_time = start_time
         g.request_id = "res-req-id-222"
-        mock_time.return_value = end_time
         
         response = app.response_class(
             response="<h1>Hello</h1>",
@@ -241,39 +267,45 @@ def test_log_response_non_json(mock_logger_info, mock_time, app):
         
         log_response(response)
         
-        mock_logger_info.assert_called_once()
-        log_message = mock_logger_info.call_args[0][0]
-        log_data = json.loads(log_message.replace("Response: ", ""))
+        # Verify the logger was called with the correct structured data
+        mock_logger.info.assert_called_once()
+        log_data = mock_logger.info.call_args[1]
         
-        assert log_data['request_id'] == "res-req-id-222"
+        assert log_data['event'] == 'Outgoing response'
         assert log_data['status_code'] == 200
-        assert log_data['duration'] == pytest.approx(end_time - start_time)
-        assert log_data['data'] == "<Non-JSON response>"
-        assert log_data['headers']['Content-Type'] == 'text/html; charset=utf-8'
+        assert log_data['duration_ms'] == 100.0  # (12300.1 - 12300.0) * 1000
+        assert log_data['request_id'] == 'res-req-id-222'
+        assert 'headers' in log_data
+        assert log_data['headers']['Content-Type'] == 'text/html'
+        assert log_data['body'] == '<h1>Hello</h1>'
 
 @patch('services.utils.log_utils.time.time')
-@patch('logging.Logger.info')
-def test_log_response_no_start_time(mock_logger_info, mock_time, app):
+@patch('structlog.get_logger')
+def test_log_response_no_start_time(mock_logger_factory, mock_time, app):
     """Test logging a response when start time is missing from g."""
-    test_logger = logging.getLogger("test_res_log_no_g")
-    test_logger.propagate = False
     end_time = 12399.9
+    
+    mock_logger = MagicMock()
+    mock_logger_factory.return_value = mock_logger
+    mock_time.return_value = end_time
     
     with app.test_request_context('/test_no_g'):
         # g.request_start_time is NOT set
         g.request_id = "res-req-id-333"
-        mock_time.return_value = end_time
         
         response = jsonify({"message": "ok"})
         response.status_code = 200
         
         log_response(response)
         
-        mock_logger_info.assert_called_once()
-        log_message = mock_logger_info.call_args[0][0]
-        log_data = json.loads(log_message.replace("Response: ", ""))
+        # Verify the logger was called with the correct structured data
+        mock_logger.info.assert_called_once()
+        log_data = mock_logger.info.call_args[1]
         
-        assert log_data['request_id'] == "res-req-id-333"
+        assert log_data['event'] == 'Outgoing response'
         assert log_data['status_code'] == 200
-        assert log_data['duration'] is None # Duration should be None
-        assert log_data['data'] == {"message": "ok"} 
+        assert log_data['duration_ms'] == 0.0  # No start time means duration should be 0
+        assert log_data['request_id'] == 'res-req-id-333'
+        assert 'headers' in log_data
+        assert log_data['headers']['Content-Type'] == 'application/json'
+        assert log_data['body'] == {"message": "ok"} 

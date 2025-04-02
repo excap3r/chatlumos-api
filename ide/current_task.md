@@ -93,3 +93,22 @@
 - [x] Update other direct Redis users (if found) to use injected client or access `current_app.redis_client` (if appropriate, e.g., decorators initialized early).
 - [ ] Verify changes and ensure tests pass (if tests exist).
 - [ ] Mark task as complete in `current_task.md`.
+
+## Task: Debug Failing Tests
+
+-   [x] Remove unused `ssrf-filter` package from `requirements.txt`.
+-   [x] Update `torch` version in `requirements.txt` from `2.3.0` to `2.6.0`.
+-   [x] Update `flask-swagger-ui` version in `requirements.txt` from `5.11` to `4.11.1`.
+-   [x] Install `swig` using brew.
+-   [x] Remove pinned versions for `pydantic` and `tokenizers` (and related dependencies) in `requirements.txt` to allow latest compatible versions for Python 3.13.
+-   [x] Install `cmake` and `libomp` using brew (for faiss-cpu build).
+-   [x] Replace `faiss-cpu` with `annoy` for vector similarity search.
+-   [x] Install dependencies using `pip install -r requirements.txt`.
+-   [ ] Run `pytest` to evaluate test results after dependency fixes and code changes.
+-   [ ] Analyze `pytest` results and fix any remaining issues.
+
+## Next Steps:
+1. Run the test suite to check if all dependencies are working correctly
+2. Update any code that was using `faiss-cpu` to use `annoy` instead
+3. Fix any remaining test failures
+4. Document the changes in the codebase

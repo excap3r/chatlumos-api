@@ -6,7 +6,7 @@ from services.utils.error_utils import APIError
 
 # Assuming fixtures like 'client', 'auth_headers' are defined in conftest.py
 
-def test_ask_non_streaming_success(client, auth_headers):
+def test_ask_non_streaming_success(client, auth_headers, request_context):
     """Test successful /ask request with stream=false."""
     # Mock the backend call that ask_route makes
     # This depends on the implementation: does it call LLMService directly? Or API Gateway?

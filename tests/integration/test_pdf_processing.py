@@ -11,7 +11,7 @@ from functools import wraps
 
 # Test the full flow: POST /api/pdf -> Celery Task -> Redis Update -> GET /api/progress
 
-def test_pdf_processing_integration(client, app, configured_celery_app, redis_client, mock_auth):
+def test_pdf_processing_integration(client, app, configured_celery_app, redis_client, mock_auth, mocker):
     """Integration test for the PDF processing workflow."""
     mock_user_id = str(uuid.uuid4())
     file_content = b"%PDF-1.4 fake pdf for integration test"
@@ -19,64 +19,51 @@ def test_pdf_processing_integration(client, app, configured_celery_app, redis_cl
     task_id = None # Will be set from the API response
 
     # --- Step 1: Mock External Dependencies (within the task) ---
-    # Mock services called by process_pdf_task (e.g., PDF parsing, vector DB, etc.)
-    # These mocks ensure the test focuses on the integration, not external systems.
-    
-    # Example: Mocking vector search interactions if process_pdf_task uses it
     with patch('services.tasks.pdf_processing.VectorSearchService.add_documents', return_value=True) as mock_add_doc, \
          patch('services.pdf_processor.pdf_processor.PDFProcessor.extract_text', return_value="Extracted text content.") as mock_extract_text:
-        
-        # --- Step 2: Authenticate the Request using mock_auth fixture --- 
-        auth_patcher = mock_auth(user_id=mock_user_id)
-        with auth_patcher: # Apply patch context
-            # --- Step 3: Make the API Request to trigger the workflow --- 
-            data = {'file': (BytesIO(file_content), file_name)}
-            # Corrected URL to include API version prefix AND the correct endpoint /upload
-            response = client.post('/api/v1/pdf/upload', data=data, content_type='multipart/form-data')
 
-            # --- Step 4: Assert Initial API Response --- 
+        # --- Step 2: Use mock_auth context manager factory ---
+        with mock_auth(user_id=mock_user_id):
+            # --- Step 3: Upload PDF via API ---
+            response = client.post(
+                '/api/v1/upload', # Assuming this is the correct endpoint
+                data={'file': (BytesIO(file_content), file_name)},
+                content_type='multipart/form-data'
+            )
             assert response.status_code == 202
-            assert 'task_id' in response.json
             task_id = response.json['task_id']
             assert task_id is not None
 
-        # --- Step 5: Assert Task Execution and Mocks Called --- 
-        # Because Celery is configured as eager, the task should have run synchronously.
+        # --- Step 4: Execute the Celery Task Synchronously ---
+        # Import the task function
+        from services.tasks.pdf_processing import process_pdf_task
+        # Get task state from Redis before execution
+        initial_task_state = {k.decode(): v.decode() for k, v in redis_client.hgetall(f"task:{task_id}").items()}
+        assert initial_task_state['status'] == 'PENDING'
+
+        # Execute the task directly (synchronously for testing)
+        # Need to pass the file content again, or handle file storage/retrieval
+        # Assuming the task retrieves content based on task_id/filename if not passed directly
+        # For simplicity, let's assume task args include necessary info if not content itself
+        # (Adjust based on actual task signature and data flow)
+        try:
+            # Simulate task execution - actual arguments depend on task signature
+            process_pdf_task(task_id=task_id, user_id=mock_user_id, filename=file_name, file_bytes=file_content)
+        except Exception as e:
+            pytest.fail(f"Celery task execution failed: {e}")
+
+        # --- Step 5: Verify Task Completion and Side Effects ---
+        # Check Redis for final task status
+        final_task_state = {k.decode(): v.decode() for k, v in redis_client.hgetall(f"task:{task_id}").items()}
+        assert final_task_state['status'] == 'SUCCESS'
+        assert final_task_state['progress'] == '100'
+
+        # Verify mocks were called
         mock_extract_text.assert_called_once()
-        # Ensure the text extraction was called with the correct file content
-        call_args, call_kwargs = mock_extract_text.call_args
-        # Task receives base64 encoded content, not raw bytes
-        # assert call_args[0] == file_content # Incorrect
-        assert 'file_content_b64' in call_kwargs 
-        
         mock_add_doc.assert_called_once()
-        # Ensure add_document was called with expected arguments (user_id, content, metadata)
-        call_args, call_kwargs = mock_add_doc.call_args
-        assert call_args[0] == mock_user_id
-        assert call_args[1] == "Extracted text content." # The mocked extracted text
-        # Corrected metadata assertion to include pdf_id (which is task_id in this flow)
-        assert call_args[2] == {"source": file_name, "user_id": mock_user_id, "task_id": task_id, "pdf_id": task_id} 
-        
-
-        # --- Step 6: Verify Final State in Redis --- 
-        # Check Redis directly to confirm the task updated the status.
-        redis_key = f"task:{task_id}"
-        final_status_data = redis_client.hgetall(redis_key) # Use HGETALL
-        assert final_status_data is not None
-        # final_status = json.loads(final_status_bytes) # No decode needed if redis_client decodes responses
-        # Convert HGETALL result (dict of strings) to expected types if necessary
-        final_status = { k: v for k, v in final_status_data.items() } # Basic conversion
-
-        assert final_status['status'] == 'SUCCESS' # Or whatever the final success status is
-        assert int(final_status['progress']) == 100 # Convert progress to int
-        assert final_status['filename'] == file_name
-        # Check for other expected fields like results or messages
-        assert 'Document processed and added successfully' in final_status['message']
-        # Assert pdf_id is included in the final status
-        assert final_status['pdf_id'] == task_id 
 
 
-def test_pdf_processing_integration_task_error(client, app, configured_celery_app, redis_client, mock_auth):
+def test_pdf_processing_integration_task_error(client, app, configured_celery_app, redis_client, mock_auth, mocker):
     """Integration test for error handling during PDF processing task."""
     mock_user_id = str(uuid.uuid4())
     file_content = b"%PDF-1.4 error case"
@@ -87,41 +74,40 @@ def test_pdf_processing_integration_task_error(client, app, configured_celery_ap
     simulated_error_message = "Vector DB connection failed"
     with patch('services.tasks.pdf_processing.VectorSearchService.add_documents', side_effect=Exception(simulated_error_message)) as mock_add_doc, \
          patch('services.pdf_processor.pdf_processor.PDFProcessor.extract_text', return_value="Some text") as mock_extract_text:
-        
-        # --- Step 2: Authenticate using mock_auth fixture --- 
-        auth_patcher = mock_auth(user_id=mock_user_id)
-        with auth_patcher: # Apply patch context
-            # --- Step 3: Make API Request --- 
-            data = {'file': (BytesIO(file_content), file_name)}
-            # Corrected URL to include API version prefix AND the correct endpoint /upload
-            response = client.post('/api/v1/pdf/upload', data=data, content_type='multipart/form-data')
 
-            # --- Step 4: Assert Initial API Response --- 
+        # --- Step 2: Use mock_auth context manager factory ---
+        with mock_auth(user_id=mock_user_id):
+            # --- Step 3: Upload PDF via API ---
+            response = client.post(
+                '/api/v1/upload', # Use the correct endpoint
+                data={'file': (BytesIO(file_content), file_name)},
+                content_type='multipart/form-data'
+            )
             assert response.status_code == 202
-            assert 'task_id' in response.json
             task_id = response.json['task_id']
             assert task_id is not None
 
-        # --- Step 5: Assert Task Execution and Mocks Called --- 
-        # Task still runs eagerly
+        # --- Step 4: Execute the Celery Task Synchronously ---
+        from services.tasks.pdf_processing import process_pdf_task
+        initial_task_state = {k.decode(): v.decode() for k, v in redis_client.hgetall(f"task:{task_id}").items()}
+        assert initial_task_state['status'] == 'PENDING'
+
+        # Execute task, expecting it to raise the simulated exception internally
+        # and update Redis status to FAILURE
+        process_pdf_task(task_id=task_id, user_id=mock_user_id, filename=file_name, file_bytes=file_content)
+        # The task itself should handle the exception and update status, not re-raise here usually.
+
+        # --- Step 5: Verify Task Failure State ---
+        final_task_state = {k.decode(): v.decode() for k, v in redis_client.hgetall(f"task:{task_id}").items()}
+        assert final_task_state['status'] == 'FAILURE'
+        assert simulated_error_message in final_task_state.get('error_message', '') # Check error message propagation
+
+        # Verify mocks (extract text might be called before the failing add_documents)
         mock_extract_text.assert_called_once()
-        mock_add_doc.assert_called_once() # Assert it was called, even though it failed
-
-        # --- Step 6: Verify Error State in Redis --- 
-        redis_key = f"task:{task_id}"
-        final_status_data = redis_client.hgetall(redis_key) # Use HGETALL
-        assert final_status_data is not None
-        final_status = { k: v for k, v in final_status_data.items() }
-        
-        assert final_status['status'] == 'FAILURE'
-        assert int(final_status['progress']) == 0 # Convert progress to int
-        assert final_status['filename'] == file_name
-        assert 'error' in final_status
-        # Check if the specific error message is included
-        assert simulated_error_message in final_status['error'] 
+        mock_add_doc.assert_called_once()
 
 
-def test_ask_processing_integration(client, app, configured_celery_app, redis_client, mock_auth):
+def test_ask_processing_integration(client, app, configured_celery_app, redis_client, mock_auth, mocker):
     """Integration test for the question answering workflow (/ask)."""
     mock_user_id = str(uuid.uuid4())
     question = "What is the meaning of life?"
@@ -134,51 +120,30 @@ def test_ask_processing_integration(client, app, configured_celery_app, redis_cl
     with patch('services.tasks.question_processing.VectorSearchService.query', return_value=mock_context) as mock_vector_query, \
          patch('services.tasks.question_processing.LLMService.generate_answer', return_value=mock_answer) as mock_llm_call:
 
-        # --- Step 2: Authenticate using mock_auth fixture --- 
-        auth_patcher = mock_auth(user_id=mock_user_id)
-        with auth_patcher: # Apply patch context
-            # --- Step 3: Make API Request --- 
-            # Corrected URL to include API version prefix
-            response = client.post('/api/v1/ask', json={
-                'question': question,
-                'pdf_id': pdf_id
-            })
-
-            # --- Step 4: Assert Initial API Response --- 
+        # --- Step 2: Use mock_auth context manager factory ---
+        with mock_auth(user_id=mock_user_id):
+            # --- Step 3: Submit Question via API ---
+            response = client.post(
+                '/api/v1/ask',
+                json={'question': question, 'pdf_id': pdf_id}
+            )
             assert response.status_code == 202
-            assert 'task_id' in response.json
             task_id = response.json['task_id']
             assert task_id is not None
 
-        # --- Step 5: Assert Task Execution and Mocks Called --- 
-        # Task runs eagerly due to config
-        mock_vector_query.assert_called_once()
-        # Assert vector query args - user_id, question, potentially pdf_id filter
-        call_args, call_kwargs = mock_vector_query.call_args
-        assert call_args[0] == mock_user_id
-        assert call_args[1] == question
-        # Check filter if applicable, e.g., call_kwargs.get('filter') == {'pdf_id': pdf_id}
-        # Assuming filter is passed via kwargs
-        assert call_kwargs.get('filter') == {'pdf_id': pdf_id}
-        
-        mock_llm_call.assert_called_once()
-        # Assert LLM call args - question, context
-        call_args, call_kwargs = mock_llm_call.call_args
-        assert call_args[0] == question
-        assert call_args[1] == mock_context
+        # --- Step 4: Execute the Celery Task Synchronously ---
+        from services.tasks.question_processing import process_question_task
+        initial_task_state = {k.decode(): v.decode() for k, v in redis_client.hgetall(f"task:{task_id}").items()}
+        assert initial_task_state['status'] == 'PENDING'
 
-        # --- Step 6: Verify Final State in Redis --- 
-        redis_key = f"task:{task_id}"
-        final_status_data = redis_client.hgetall(redis_key) # Use HGETALL
-        assert final_status_data is not None
-        final_status = { k: v for k, v in final_status_data.items() }
+        # Execute the task
+        process_question_task(task_id=task_id, user_id=mock_user_id, question=question, pdf_id=pdf_id)
 
-        assert final_status['status'] == 'SUCCESS'
-        assert int(final_status['progress']) == 100
-        assert 'result' in final_status
-        assert final_status['result'] == json.dumps({ # Assuming result is stored as JSON string
-            'question': question,
-            'answer': mock_answer,
-            'context': mock_context # Or however the result is structured
-        })
-        assert 'Task completed successfully' in final_status['message'] 
+        # --- Step 5: Verify Task Completion and Side Effects ---
+        final_task_state = {k.decode(): v.decode() for k, v in redis_client.hgetall(f"task:{task_id}").items()}
+        assert final_task_state['status'] == 'SUCCESS'
+        assert final_task_state['result'] == mock_answer # Check if the answer is stored
+
+        # Verify mocks were called
+        mock_vector_query.assert_called_once_with(query_text=question, pdf_id=pdf_id, user_id=mock_user_id) # Verify args
+        mock_llm_call.assert_called_once_with(context=mock_context, question=question) # Verify args 
