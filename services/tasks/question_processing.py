@@ -22,15 +22,10 @@ load_dotenv()
 
 # Configure logger
 logger = structlog.get_logger(__name__)
-# Basic config if running standalone (adjust as needed)
-# if not logger.hasHandlers(): # Removing this, assuming standard logging setup
-#     logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 
-# --- Removed Mock/Unused API Gateway --- 
-# class APIGateway:
-#     ...
-# class ServiceError(Exception):
-#     pass
+# Custom exception for service-related errors within this module
+class ServiceError(Exception):
+    pass
 
 # --- Helper to get Redis Client (using AppConfig) ---
 def get_redis_client():

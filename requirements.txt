@@ -8,7 +8,7 @@ SQLAlchemy==2.0.31 # ORM
 Alembic==1.13.2 # Migrations
 python-dotenv==1.0.1
 requests==2.32.3
-tqdm==4.64.0
+tqdm==4.66.3
 numpy==1.26.4
 
 # LLM & Tokenization
@@ -21,14 +21,14 @@ sentence-transformers==2.7.0
 annoy==1.17.3  # Alternative to faiss-cpu for vector similarity search
 
 # Translation & Language
-deep-translator==1.10.1
+deep-translator==1.11.4
 
 # API Server & Framework
 Flask==2.3.3  # Downgraded for pytest-flask compatibility
-Flask-Cors==4.0.1
+Flask-Cors==4.0.2
 Flask-JWT-Extended # Added for authentication
-Werkzeug==2.3.7  # Match Flask version
-gunicorn==20.1.0
+Werkzeug==2.3.8  # Match Flask version
+gunicorn==23.0.0
 gevent==24.2.1 # For Gunicorn worker type
 
 # Input Validation

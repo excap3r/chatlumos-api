@@ -9,7 +9,7 @@ and API key management using a connection pool managed by the main application.
 # import logging # Removed
 # import time # Removed
 from typing import Dict, Any, List, Optional # Removed Tuple, Union
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 # import mysql.connector # Removed
 # from mysql.connector import pooling, Error # Removed
 import uuid
@@ -24,7 +24,7 @@ import json
 from sqlalchemy.orm import Session # Add Session import
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError # Add SQLAlchemy exceptions
 from sqlalchemy.orm import joinedload, selectinload # To fetch User efficiently
-from sqlalchemy import delete # Import delete statement
+from sqlalchemy import delete, select, insert, update # Import delete statement and other SQLAlchemy statements
 
 # Import Models
 from .models.user_models import User, UserRoleAssociation, APIKey # Import User, association, and APIKey
@@ -37,7 +37,7 @@ from .exceptions import (
     UserNotFoundError, UserAlreadyExistsError, InvalidCredentialsError, ApiKeyNotFoundError
 )
 # Import DB session handler decorator
-from .db_utils import handle_db_session
+from .db_utils import handle_db_session, _get_session
 
 # Configure logger
 logger = structlog.get_logger(__name__) # Changed
@@ -92,6 +92,40 @@ def _get_session() -> Session:
         raise ConnectionError("Database session not available.")
     # db_session is a scoped_session factory, call it to get the actual session
     return current_app.db_session()
+
+# --- Helper function to convert User model to dict ---
+def _user_to_dict(user: User, roles: Optional[List[str]] = None) -> Dict[str, Any]:
+    """Converts a User SQLAlchemy model instance to a dictionary.
+    Optionally includes roles if provided separately.
+    """
+    if not user:
+        return {}
+        
+    # If roles are not provided, try to get them from the relationship
+    # This requires the relationship to be loaded (e.g., via selectinload)
+    if roles is None:
+        try:
+            # Check if roles relationship is loaded or accessible
+            if hasattr(user, 'roles') and user.roles:
+                 roles = [assoc.role for assoc in user.roles]
+            else:
+                 roles = [] # Default to empty if not loaded/available
+        except Exception as e:
+            # Log error if accessing roles fails unexpectedly
+            logger.warning("Failed to access user roles relationship in _user_to_dict", user_id=str(user.id), error=str(e))
+            roles = []
+
+    return {
+        "id": str(user.id),
+        "username": user.username,
+        "email": user.email,
+        "is_active": user.is_active,
+        "created_at": user.created_at,
+        "updated_at": user.updated_at,
+        "last_login": user.last_login,
+        "roles": roles,
+        "permissions": [] # Permissions not directly handled here
+    }
 
 # User Operations
 
@@ -335,145 +369,152 @@ def update_user(
         logger.error("Unexpected error updating user", user_id=user_id, error=str(e), exc_info=True)
         raise DatabaseError(f"An unexpected error occurred updating user: {e}")
 
-def update_user_roles(
-    user_id: str,
-    roles: List[str]
-) -> Dict[str, Any]:
+@handle_db_session
+def update_user_roles(user_id_str: str, roles: list[str]) -> dict:
     """
-    Update user roles. Replaces existing roles with the provided list.
+    Update user roles in the database using SQLAlchemy.
+    Removes roles not in the input list and adds new ones.
+    """
+    session = _get_session()
+    try:
+        user_id = uuid.UUID(user_id_str)
+    except ValueError:
+        logger.error("Invalid user ID format for role update", user_id=user_id_str)
+        raise UserNotFoundError("Invalid user ID format")
+
+    user = session.query(User).filter(User.id == user_id).first()
+    if not user:
+        logger.warning("User not found for role update", user_id=user_id_str)
+        raise UserNotFoundError(f"User with ID {user_id_str} not found")
+
+    # Get current roles for the user
+    current_role_assocs = session.query(UserRoleAssociation).filter(
+        UserRoleAssociation.user_id == user_id
+    ).all()
+    current_roles = {assoc.role for assoc in current_role_assocs}
+    target_roles = set(roles)
+
+    roles_to_add = target_roles - current_roles
+    roles_to_remove = current_roles - target_roles
+
+    if not roles_to_add and not roles_to_remove:
+        logger.info("No role changes needed for user", user_id=user_id_str)
+        # Re-query roles to return current state accurately
+        updated_roles = [assoc.role for assoc in session.query(UserRoleAssociation.role).filter(UserRoleAssociation.user_id == user_id).all()]
+        return _user_to_dict(user, roles=updated_roles)
+
+    # Remove roles
+    if roles_to_remove:
+        logger.info("Removing roles from user", user_id=user_id_str, roles_to_remove=list(roles_to_remove))
+        session.query(UserRoleAssociation).filter(
+            UserRoleAssociation.user_id == user_id,
+            UserRoleAssociation.role.in_(roles_to_remove)
+        ).delete(synchronize_session=False)
+
+    # Add new roles
+    if roles_to_add:
+        logger.info("Adding roles to user", user_id=user_id_str, roles_to_add=list(roles_to_add))
+        for role_name in roles_to_add:
+            new_assoc = UserRoleAssociation(user_id=user_id, role=role_name)
+            session.add(new_assoc)
     
-    Args:
-        user_id: User ID (UUID string)
-        roles: List of role names
-        
-    Returns:
-        Updated user information dictionary
-        
-    Raises:
-        UserNotFoundError: If user not found
-        QueryError: If database query fails
-    """
-    user_exists_flag = False # Flag to check if user was found
-    try:
-        with get_connection() as conn:
-            with conn.cursor() as cursor:
-
-                # Check if user exists
-                cursor.execute("SELECT id FROM users WHERE id = %s FOR UPDATE", (user_id,)) # Use string user_id, lock row
-                if cursor.fetchone():
-                    user_exists_flag = True
-                else:
-                    raise UserNotFoundError(f"User with ID {user_id} not found")
-
-                # Delete existing roles from user_roles table
-                cursor.execute("DELETE FROM user_roles WHERE user_id = %s", (user_id,))
-
-                # Insert new roles directly into user_roles table
-                if roles:
-                    role_values = [(user_id, role_name) for role_name in roles]
-                    cursor.executemany(
-                        "INSERT INTO user_roles (user_id, role) VALUES (%s, %s)",
-                        role_values
-                    )
-
-                conn.commit()
-                logger.info("User roles updated successfully in DB", user_id=user_id, new_roles=roles)
-
-    except UserNotFoundError:
-         raise # Re-raise
-    except Error as e:
-        # Rollback handled automatically
-        logger.error("Database error updating user roles", user_id=user_id, roles=roles, error=str(e), exc_info=True)
-        raise QueryError(f"Failed to update user roles: {str(e)}")
-    except Exception as e:
-        logger.error("Unexpected error updating user roles", user_id=user_id, error=str(e), exc_info=True)
-        raise QueryError(f"Unexpected error updating user roles: {str(e)}")
-
-    # Fetch updated user details outside transaction context
-    try:
-         return get_user_by_id(user_id)
-    except Exception as fetch_err:
-         logger.error("Failed to fetch user details after successful role update", user_id=user_id, error=str(fetch_err))
-         return {"id": user_id, "roles": roles, "warning": "Roles updated but failed to fetch full details."}
-
-def update_user_password(user_id: str, new_password: str) -> bool:
-    """
-    Update user password using bcrypt.
-    """
-    try:
-        with get_connection() as conn:
-            with conn.cursor() as cursor:
-                # Hash the new password using bcrypt (salt is generated internally)
-                new_hashed_password = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt())
-                
-                cursor.execute(
-                    "UPDATE users SET password_hash = %s WHERE id = %s",
-                    (new_hashed_password.decode('utf-8'), user_id)
-                )
-                
-                if cursor.rowcount == 0:
-                    logger.warning("Password update failed: User not found", user_id=user_id)
-                    raise UserNotFoundError(f"User with ID {user_id} not found for password update.")
-            
-                conn.commit()
-                logger.info("User password updated successfully", user_id=user_id)
-                return True
-    except UserNotFoundError: # Re-raise specific error
-        raise
-    except Error as e:
-        # Rollback handled automatically
-        logger.error("Database error updating password", user_id=user_id, error=str(e), exc_info=True)
-        raise QueryError(f"Failed to update password: {str(e)}")
-    except Exception as e:
-        logger.error("Unexpected error updating password", user_id=user_id, error=str(e), exc_info=True)
-        raise QueryError(f"Unexpected error updating password: {str(e)}")
-
-# API Key Operations
+    # Update timestamp and commit
+    user.updated_at = datetime.now(timezone.utc)
+    session.commit()
+    logger.info("User roles updated successfully", user_id=user_id_str, new_roles=roles)
+    
+    # Re-query roles to return the final state
+    final_roles = [assoc.role for assoc in session.query(UserRoleAssociation.role).filter(UserRoleAssociation.user_id == user_id).all()]
+    return _user_to_dict(user, roles=final_roles)
 
 @handle_db_session
-def create_api_key(user_id: str, name: str, expires_at: Optional[datetime] = None) -> Dict[str, Any]:
+def update_user_password(user_id_str: str, new_password: str) -> bool:
     """
-    Create a new API key for a user.
+    Update user password using bcrypt and SQLAlchemy.
     """
-    key_id = str(uuid.uuid4()) 
-    # Generate a secure API key (consider using secrets module)
-    api_key = str(uuid.uuid4()) # Simple UUID for now, use more secure generation
-    hashed_key = bcrypt.hashpw(api_key.encode('utf-8'), bcrypt.gensalt()).decode('utf-8') # Hash the key
-    
+    session = _get_session()
     try:
-        # Use context managers
-        with get_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute(
-                    "INSERT INTO api_keys (id, user_id, name, key_hash, expires_at, is_active) VALUES (%s, %s, %s, %s, %s, TRUE)",
-                    (key_id, user_id, name, hashed_key, expires_at)
-                )
-                conn.commit()
-                logger.info("API key created successfully in DB", user_id=user_id, key_id=key_id, key_name=name) # Changed
+        user_id = uuid.UUID(user_id_str)
+    except ValueError:
+        logger.error("Invalid user ID format for password update", user_id=user_id_str)
+        raise UserNotFoundError("Invalid user ID format")
 
-    except Error as e:
-        # Rollback handled automatically
-        # Check for specific foreign key constraint violation (user_id not found)
-        if hasattr(e, 'errno') and e.errno == 1452:
-            logger.warning("Failed to create API key: User not found", user_id=user_id, key_name=name, error_code=e.errno)
-            raise UserNotFoundError(f"Cannot create API key: User with ID {user_id} not found")
-        else:
-            # Handle other database errors
-            logger.error("Database error creating API key", user_id=user_id, key_name=name, error=str(e), exc_info=True) # Changed
-            raise QueryError(f"Failed to create API key: {str(e)}")
-    except Exception as e:
-        logger.error("Unexpected error creating API key", user_id=user_id, key_name=name, error=str(e), exc_info=True)
-        raise QueryError(f"Unexpected error creating API key: {str(e)}")
+    user = session.query(User).filter(User.id == user_id).first()
 
-    # Return the *unhashed* key only after successful commit
+    if not user:
+        logger.warning("User not found for password update", user_id=user_id_str)
+        raise UserNotFoundError(f"User with ID {user_id_str} not found for password update.")
+
+    # Hash the new password using bcrypt
+    new_hashed_password_bytes = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt())
+    new_hashed_password_str = new_hashed_password_bytes.decode('utf-8')
+
+    user.password_hash = new_hashed_password_str
+    user.updated_at = datetime.now(timezone.utc)
+
+    session.commit()
+    logger.info("User password updated successfully", user_id=user_id_str)
+    return True
+
+# --- API Keys ---
+
+@handle_db_session
+def create_api_key(user_id_str: str, name: str, expires_at: Optional[datetime] = None) -> Dict[str, Any]:
+    """
+    Create a new API key for a user using SQLAlchemy ORM.
+    Generates a new key, hashes it, and stores it.
+    Returns the key details including the *unhashed* key.
+    """
+    session = _get_session()
+    try:
+        user_id = uuid.UUID(user_id_str)
+    except ValueError:
+        logger.error("Invalid user ID format for API key creation", user_id=user_id_str)
+        raise UserNotFoundError("Invalid user ID format")
+
+    # Check if user exists
+    user = session.query(User.id).filter(User.id == user_id).first()
+    if not user:
+        logger.warning("Failed to create API key: User not found", user_id=user_id_str)
+        raise UserNotFoundError(f"Cannot create API key: User with ID {user_id_str} not found")
+
+    # Generate a secure API key (e.g., using UUID or secrets module)
+    # Using a simple prefix + UUID for illustration, enhance as needed.
+    key_prefix = "sk_" # Example prefix
+    key_suffix = str(uuid.uuid4()).replace('-','') # Remove hyphens for cleaner key
+    api_key = f"{key_prefix}{key_suffix}"
+    
+    # Hash the key using bcrypt
+    hashed_key = bcrypt.hashpw(api_key.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+    # Create the new APIKey object
+    new_api_key = APIKey(
+        user_id=user_id,
+        name=name,
+        prefix=key_prefix, # Store the prefix for potential future filtering
+        key_hash=hashed_key,
+        expires_at=expires_at
+        # id, created_at, updated_at, last_used, is_active have defaults
+    )
+
+    session.add(new_api_key)
+    session.commit()
+    logger.info("API key created successfully", user_id=user_id_str, key_id=str(new_api_key.id), key_name=name)
+    
+    # Refresh to get default values like created_at and id
+    session.refresh(new_api_key)
+
+    # Return the *unhashed* key and its details
     return {
-        'id': key_id,
-        'user_id': user_id,
-        'name': name,
-        'api_key': api_key, # Important: Return the actual key here
-        'created_at': datetime.utcnow(), # Approximate
-        'expires_at': expires_at,
-        'is_active': True
+        'key_id': str(new_api_key.id),
+        'user_id': user_id_str,
+        'name': new_api_key.name,
+        'api_key': api_key,  # Important: Return the actual key here
+        'prefix': new_api_key.prefix,
+        'created_at': new_api_key.created_at,
+        'expires_at': new_api_key.expires_at,
+        'last_used': new_api_key.last_used,
+        'is_active': new_api_key.is_active
     }
 
 @handle_db_session
@@ -537,7 +578,7 @@ def verify_api_key(api_key: str) -> Optional[Dict[str, Any]]:
         # --- Database Lookup & Verification (executed if cache miss) --- #
         # Performance Bottleneck: Fetch all potentially valid keys.
         # Ideally, filter by an indexed prefix extracted from api_key here.
-        current_time = datetime.utcnow()
+        current_time = datetime.now(timezone.utc) # Use timezone-aware UTC now
         potential_keys = session.query(APIKey).options(
             joinedload(APIKey.user).options( # Eager load user and roles
                 selectinload(User.roles)
@@ -581,7 +622,7 @@ def verify_api_key(api_key: str) -> Optional[Dict[str, Any]]:
 
             # --- Update last used time for the key --- #
             try:
-                matched_key_record.last_used = datetime.utcnow()
+                matched_key_record.last_used = datetime.now(timezone.utc) # Use timezone-aware UTC now
                 session.commit()
                 logger.debug("Updated last_used for API key", key_id=str(matched_key_record.id))
             except SQLAlchemyError as update_err:
@@ -633,88 +674,92 @@ def verify_api_key(api_key: str) -> Optional[Dict[str, Any]]:
         raise DatabaseError(f"An unexpected error occurred during API key verification: {e}")
 
 @handle_db_session
-def get_user_api_keys(user_id: str) -> List[Dict[str, Any]]:
+def get_user_api_keys(user_id_str: str) -> List[Dict[str, Any]]:
     """
     Get all API keys associated with a user using SQLAlchemy ORM.
     Excludes the key_hash from the result.
     """
     session = _get_session()
     try:
-        user_uuid = uuid.UUID(user_id)
+        user_id = uuid.UUID(user_id_str)
     except ValueError:
-        logger.warning("Invalid UUID format provided for get_user_api_keys", user_id=user_id)
-        # Return empty list or raise UserNotFoundError depending on desired behavior
-        return []
-        # Or: raise UserNotFoundError(f"Invalid user ID format: {user_id}")
+        logger.warning("Invalid UUID format provided for get_user_api_keys", user_id=user_id_str)
+        return [] # Return empty list for invalid user ID format
 
-    try:
-        # Query API keys for the user
-        keys = session.query(APIKey).filter(APIKey.user_id == user_uuid).all()
+    # Query API keys for the user, ordered by creation time
+    keys = session.query(APIKey).filter(APIKey.user_id == user_id).order_by(APIKey.created_at.desc()).all()
 
-        # Format keys into dictionaries, excluding the hash
-        key_list = []
-        for key in keys:
-            key_list.append({
-                "id": str(key.id),
-                "user_id": str(key.user_id),
-                "name": key.name,
-                "created_at": key.created_at,
-                "expires_at": key.expires_at,
-                "last_used": key.last_used,
-                "is_active": key.is_active
-                # IMPORTANT: Do NOT include key.key_hash
-            })
+    # Format keys into dictionaries, excluding the hash
+    key_list = []
+    for key in keys:
+        key_list.append({
+            "key_id": str(key.id),
+            "user_id": str(key.user_id),
+            "name": key.name,
+            "prefix": key.prefix,
+            "created_at": key.created_at,
+            "expires_at": key.expires_at,
+            "last_used": key.last_used,
+            "is_active": key.is_active
+            # IMPORTANT: Do NOT include key.key_hash
+        })
 
-        logger.debug("Retrieved API keys for user", user_id=user_id, count=len(key_list))
-        return key_list
-
-    except SQLAlchemyError as e:
-        logger.error("Database error retrieving API keys for user", user_id=user_id, error=str(e), exc_info=True)
-        raise QueryError(f"Failed to get API keys: {e}")
-    except Exception as e:
-        logger.error("Unexpected error retrieving API keys for user", user_id=user_id, error=str(e), exc_info=True)
-        raise DatabaseError(f"An unexpected error occurred getting API keys: {e}")
+    logger.debug("Retrieved API keys for user", user_id=user_id_str, count=len(key_list))
+    return key_list
 
 @handle_db_session
-def revoke_api_key(key_id: str) -> bool:
+def revoke_api_key(key_id_str: str) -> bool:
     """
     Revoke an API key by setting its is_active flag to False using SQLAlchemy ORM.
     """
     session = _get_session()
     try:
-        key_uuid = uuid.UUID(key_id)
+        key_id = uuid.UUID(key_id_str)
     except ValueError:
-        logger.warning("Invalid UUID format provided for revoke_api_key", key_id=key_id)
-        return False # Or raise an appropriate error
+        logger.warning("Invalid UUID format provided for revoke_api_key", key_id=key_id_str)
+        raise ApiKeyNotFoundError("Invalid API key ID format") # Raise specific error
 
-    try:
-        # Find the key
-        api_key = session.query(APIKey).filter(APIKey.id == key_uuid).first()
+    # Find the key
+    api_key = session.query(APIKey).filter(APIKey.id == key_id).first()
 
-        if not api_key:
-            logger.warning("API key revocation failed: Key not found", key_id=key_id)
-            return False # Key doesn't exist
+    if not api_key:
+        logger.warning("API key revocation failed: Key not found", key_id=key_id_str)
+        raise ApiKeyNotFoundError(f"API Key with ID {key_id_str} not found")
 
-        if not api_key.is_active:
-            logger.info("API key already revoked", key_id=key_id)
-            return True # Consider already revoked as success
+    if not api_key.is_active:
+        logger.info("API key already revoked", key_id=key_id_str)
+        return True # Consider already revoked as success
 
-        # Revoke the key
-        api_key.is_active = False
-        # updated_at timestamp on User won't be triggered, only APIKey if it had one
+    # Revoke the key
+    api_key.is_active = False
+    # Consider setting updated_at if the model has it
+    if hasattr(api_key, 'updated_at'):
+         setattr(api_key, 'updated_at', datetime.now(timezone.utc))
 
-        session.commit()
-        logger.info("API key revoked successfully", key_id=key_id)
-        return True
+    session.commit()
 
-    except SQLAlchemyError as e:
-        session.rollback()
-        logger.error("Database error revoking API key", key_id=key_id, error=str(e), exc_info=True)
-        raise QueryError(f"Failed to revoke API key: {e}")
-    except Exception as e:
-        session.rollback()
-        logger.error("Unexpected error revoking API key", key_id=key_id, error=str(e), exc_info=True)
-        raise DatabaseError(f"An unexpected error occurred revoking API key: {e}")
+    # --- Cache Invalidation (Important!) ---
+    redis_client = _get_redis_client()
+    if redis_client:
+        # How to invalidate? Need the original API key string which we don't have here.
+        # Option 1: Store hash -> key_id mapping? Complex.
+        # Option 2: Add key_id to cache key? `apikey_verify_cache:<key_id>:<hash>`?
+        # Option 3: Brute-force delete keys matching prefix? Risky.
+        # Option 4: Keep cache TTL short and accept potential staleness on revoke.
+        # For now, rely on short TTL. Add explicit invalidation if requirements demand it.
+        logger.warning("API key revoked, but cache invalidation is not implemented. Relying on TTL.", key_id=key_id_str)
+        # Example (if cache key included key_id):
+        # cache_key_pattern = f"{API_KEY_CACHE_PREFIX}{key_id_str}:*"
+        # try:
+        #     keys_to_delete = redis_client.keys(cache_key_pattern)
+        #     if keys_to_delete:
+        #         redis_client.delete(*keys_to_delete)
+        #         logger.info("Invalidated cache entries for revoked key", key_id=key_id_str, count=len(keys_to_delete))
+        # except redis.exceptions.RedisError as e:
+        #     logger.error("Redis error during cache invalidation for revoked key", key_id=key_id_str, error=str(e))
+        
+    logger.info("API key revoked successfully", key_id=key_id_str)
+    return True
 
 @handle_db_session
 def get_all_users(limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:

@@ -156,8 +156,8 @@ def create_dummy_pdf():
 # @patch('services.api.middleware.auth_middleware.require_auth', new_callable=create_mock_auth_decorator)
 @PATCH_AUTH
 @patch('services.tasks.pdf_processing.process_pdf_task.delay')
-def test_pdf_processing_integration(mock_delay, client, mock_auth):
-    """Integration test for PDF upload, task queuing, and progress checking."""
+def test_pdf_upload_queues_task(mock_delay, client, mock_auth):
+    """Integration test for PDF upload verifying Celery task queuing."""
     mock_delay.return_value = MagicMock(id=MOCK_TASK_ID)
 
     with mock_auth(user_id=MOCK_USER_ID):
@@ -203,3 +203,92 @@ def test_pdf_processing_integration(mock_delay, client, mock_auth):
     # For this example, we just check the task was queued.
 
     # ... rest of the file ... 
+
+from services.tasks.question_processing import ServiceError # Import ServiceError if needed for mocking
+
+@patch('services.tasks.question_processing._update_task_progress') # Mock the progress update helper
+@patch('services.tasks.question_processing.VectorSearchService.query')
+@patch('services.tasks.question_processing.LLMService.generate_answer')
+def test_ask_streaming_integration(mock_llm_generate, mock_vector_query, mock_update_progress, client, configured_celery_app, redis_client, mock_auth):
+    """Integration test for the streaming /ask workflow, verifying progress updates."""
+    mock_user_id = str(uuid.uuid4())
+    question = "What is streaming?"
+    task_id = None
+    mock_answer_content = "Streaming is sending data piece by piece."
+    mock_search_results = [
+        {'metadata': {'text': 'Context 1'}, 'id': 'doc1'},
+        {'metadata': {'text': 'Context 2'}, 'id': 'doc2'}
+    ]
+    # Mock service responses
+    mock_vector_query.return_value = mock_search_results
+    mock_llm_response = MagicMock()
+    mock_llm_response.is_error = False
+    mock_llm_response.content = mock_answer_content
+    mock_llm_generate.return_value = mock_llm_response
+
+    with mock_auth(user_id=mock_user_id):
+        headers = {'Authorization': 'Bearer dummy'}
+        response = client.post(
+            f'{API_BASE_URL}/ask',
+            json={
+                'question': question,
+                'stream': True # Enable streaming
+            },
+            headers=headers
+        )
+        # 1. Verify API response for streaming request
+        assert response.status_code == 202
+        task_id = response.json['task_id']
+        assert task_id is not None
+
+    # Task runs eagerly. Now verify the progress updates.
+    # 2. Verify progress updates were called via the mocked helper
+    assert mock_update_progress.call_count >= 4 # Expect at least: Start, Search, Generate, Complete
+
+    # Check some key progress calls (arguments: redis_client, redis_key, pubsub_channel, task_id, logger, status, progress, details, result, error)
+    redis_key = f"task:{task_id}"
+    pubsub_channel = f"progress:{task_id}"
+
+    # Check Starting call
+    mock_update_progress.assert_any_call(
+        ANY, # redis_client (mocked globally or passed)
+        redis_key,
+        pubsub_channel,
+        task_id,
+        ANY, # logger
+        status="Processing", progress=10, details="Starting analysis", result=None, error=None
+    )
+    # Check Searching call
+    mock_update_progress.assert_any_call(
+        ANY, redis_key, pubsub_channel, task_id, ANY,
+        status="Processing", progress=30, details=ANY, result=None, error=None # Details might vary slightly based on index/top_k defaults
+    )
+    # Check Generating call
+    mock_update_progress.assert_any_call(
+        ANY, redis_key, pubsub_channel, task_id, ANY,
+        status="Processing", progress=70, details="Generating answer...", result=None, error=None
+    )
+    # Check Completion call
+    final_result_data = {"answer": mock_answer_content}
+    mock_update_progress.assert_any_call(
+        ANY, redis_key, pubsub_channel, task_id, ANY,
+        status="Completed", progress=100, details="Answer generated successfully.",
+        result=final_result_data,
+        error=None
+    )
+
+    # 3. Verify external services were called by the task
+    mock_vector_query.assert_called_once()
+    # We need to check the args passed to query (user_id, question, top_k, index_name)
+    # Get defaults from AppConfig mock if necessary (might need to enhance fixture)
+    # Example: Assuming default top_k=5, default index='mock-index'
+    call_args, call_kwargs = mock_vector_query.call_args
+    assert call_kwargs.get('user_id') == mock_user_id
+    assert call_kwargs.get('query_text') == question
+    # assert call_kwargs.get('top_k') == MOCK_DEFAULT_TOP_K # Need to get this from mock AppConfig
+    # assert call_kwargs.get('index_name') == MOCK_DEFAULT_INDEX # Need to get this from mock AppConfig
+
+    mock_llm_generate.assert_called_once_with(
+        question=question,
+        search_results=mock_search_results
+    ) 

@@ -1,15 +1,35 @@
 # PDF Wisdom Extraction API
 
-This project provides an API for extracting information from PDF documents, storing it, and allowing users to ask questions against the extracted knowledge. It uses a Flask API server for handling requests and Celery workers for background processing tasks like PDF ingestion and question answering.
+This project provides an API for extracting information from PDF documents, storing it, and allowing users to ask questions against the extracted knowledge. It features a Flask-based API frontend, asynchronous task processing using Celery workers, and interacts with various internal services for core functionalities like text extraction, vector search, and language model interactions.
 
 ## Core Features
 
 *   **PDF Processing:** Upload PDF documents via the API for asynchronous processing (chunking, text extraction).
 *   **Knowledge Extraction:** Automatically extracts key concepts and generates Q&A pairs from processed documents using LLMs (handled by background workers).
-*   **Vector Search:** Stores extracted information as vector embeddings (using Pinecone by default) for semantic search.
+*   **Vector Search:** Stores extracted information as vector embeddings (using Pinecone by default, configured via `services.vector_search`) for semantic search.
 *   **Question Answering:** Provides an API endpoint (`/ask`) to query the knowledge base, leveraging vector search and LLMs.
 *   **Authentication:** Secure API access using JWT and API keys, with role-based access control.
 *   **Asynchronous Processing:** Uses Celery and Redis for handling long-running tasks without blocking API requests.
+*   **Service-Oriented:** Designed with distinct service components for modularity (e.g., LLM service, vector service, PDF processing).
+
+## Architecture Overview
+
+The system employs a service-oriented architecture:
+
+1.  **Flask API Frontend (`app.py`):** Handles incoming HTTP requests, authentication, request validation, and basic routing. It acts as the main entry point for external clients.
+2.  **API Gateway (`services/api_gateway`):** Used by some Flask API routes to communicate with potential downstream internal services (like a dedicated vector search or LLM inference service). This provides a level of indirection.
+3.  **Celery Workers (`celery_app.py`, `services/tasks/*`):** Execute long-running background tasks (e.g., `process_pdf_task`, `process_question_task`) asynchronously. They interact with Redis for task queuing and status updates.
+4.  **Internal Services (`services/*`):** Contain the core logic for specific domains:
+    *   `services/llm_service`: Interacts with external Large Language Models.
+    *   `services/vector_search`: Manages vector embeddings and search (e.g., Pinecone).
+    *   `services/db`: Handles database interactions (metadata, users, etc.).
+    *   `services/pdf_processor`: Extracts text and chunks PDFs.
+    *   `services/analytics`: Manages event tracking and webhooks.
+    *   *Interaction:* Celery tasks often initialize and use these service classes directly, while some Flask routes might use the API Gateway pattern to interact with them (or placeholder API calls).
+5.  **Dependencies:**
+    *   **MySQL:** Stores relational data (users, document metadata, auth tokens, etc.).
+    *   **Redis:** Used as the Celery message broker, task result backend, and for caching/rate limiting.
+    *   **Pinecone/Vector DB:** Stores and searches vector embeddings.
 
 ## Installation
 

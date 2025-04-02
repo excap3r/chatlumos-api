@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 
 # Import custom exceptions from the parent directory
-from .exceptions import QueryError, DatabaseError, ConnectionError, DuplicateEntryError, NotFoundError
+from .exceptions import QueryError, DatabaseError, ConnectionError, DuplicateEntryError, NotFoundError, InvalidCredentialsError
 
 logger = structlog.get_logger(__name__)
 

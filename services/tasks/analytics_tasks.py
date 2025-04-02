@@ -4,11 +4,12 @@ Celery tasks for handling analytics event logging asynchronously.
 
 import json
 import redis
+import redis.exceptions
 import structlog
 from datetime import datetime
 
 # Import the Celery app instance
-from ....celery_app import celery_app # Adjust relative import if necessary
+from celery_app import celery_app # Adjust relative import if necessary
 # Import config and Redis client helper (assuming one exists or create one)
 from services.config import AppConfig
 # Reuse Redis client helper if suitable, e.g., from question_processing
