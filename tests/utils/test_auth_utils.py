@@ -146,11 +146,16 @@ def test_decode_token_expired(mocker, app_context_for_tests):
     expiry_secs = 1 # Expire quickly
     token = create_token("user_exp", "exp_user", expiry=expiry_secs)
     
-    # Mock time to be significantly after the token expiry (well beyond default leeway)
-    mock_future_time = time.time() + expiry_secs + 60 # Increased margin
+    # Mock time to be slightly after the token expiry
+    # mocker.patch('time.time', return_value=time.time() + expiry_secs + 0.1) # Small margin
+    # Mock time to be significantly after the token expiry to ensure it's past leeway
+    mock_future_time = time.time() + expiry_secs + 20 # Ensure it's past default leeway (10s)
     mocker.patch('time.time', return_value=mock_future_time)
+
+    # Explicitly set leeway to 0 for this test to ensure expiration check is strict
+    mocker.patch.dict(current_app.config, {'JWT_LEEWAY': 0})
     
-    # Rely on decode_token's internal leeway check (default 10s) which should now fail
+    # decode_token uses the leeway from config (now mocked to 0)
     with pytest.raises(ExpiredTokenError):
         decode_token(token)
 

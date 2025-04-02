@@ -9,6 +9,7 @@ and API key handling.
 """
 
 import structlog
+import time
 from typing import Dict, Any, List, Optional, Tuple
 
 # Import database functions
@@ -38,41 +39,34 @@ logger = structlog.get_logger(__name__)
 
 def register_new_user(username: str, email: str, password: str, roles: Optional[List[str]] = None) -> int:
     """
-    Registers a new user, handling password hashing.
+    Registers a new user by hashing the password and calling the database layer.
 
     Args:
-        username: User's username.
-        email: User's email.
+        username: User's desired username.
+        email: User's email address.
         password: User's plain text password.
-        roles: Optional list of roles (defaults to ['user'] if None).
+        roles: Optional list of roles to assign.
 
     Returns:
-        The ID of the newly created user.
+        The user ID of the newly created user.
 
     Raises:
-        UserAlreadyExistsError: If the username or email already exists.
-        DatabaseError: For other database-related issues.
+        UserAlreadyExistsError: If the username or email is already taken.
+        DatabaseError: For database-related issues during creation.
         Exception: For unexpected errors during hashing or creation.
     """
     if roles is None:
         roles = ["user"] # Default role
 
     try:
-        password_hash, salt = hash_password(password)
-        logger.info("Hashing password for new user registration", username=username)
-    except Exception as e:
-        logger.error("Password hashing failed during registration", username=username, error=str(e), exc_info=True)
-        # Re-raise a generic exception or a custom HashingError if defined
-        raise Exception("Failed to process password for registration.") from e
-
-    try:
-        user_id = db_create_user(
+        # Pass plain password to db_create_user
+        user_details = db_create_user(
             username=username,
             email=email,
-            password_hash=password_hash,
-            password_salt=salt,
+            password=password,
             roles=roles
         )
+        user_id = user_details['id'] # Get ID from returned dict
         logger.info("User created successfully via service layer", user_id=user_id, username=username)
         return user_id
     except UserAlreadyExistsError as e:
@@ -101,16 +95,25 @@ def login_user(username: str, password: str) -> Dict[str, Any]:
         UserNotFoundError: If the user does not exist (might be raised by db_authenticate_user).
         DatabaseError: For database-related issues during authentication.
     """
+    # Explicitly import exceptions inside function scope for testing
+    from .db.exceptions import (
+        InvalidCredentialsError,
+        UserNotFoundError,
+        DatabaseError
+    )
+
     try:
         user = db_authenticate_user(username, password)
         logger.info("User authenticated successfully via service layer", username=username, user_id=user.get('id'))
         return user
+    # Catch specific, known exceptions first
     except (InvalidCredentialsError, UserNotFoundError) as e:
         logger.warning("User authentication failed (service layer)", username=username, reason=type(e).__name__)
         raise e # Re-raise the specific error
     except DatabaseError as e:
         logger.error("Database error during authentication (service layer)", username=username, error=str(e), exc_info=True)
         raise e # Re-raise the specific error
+    # Catch any other unexpected exceptions last
     except Exception as e:
         logger.error("Unexpected error during authentication (service layer)", username=username, error=str(e), exc_info=True)
         raise Exception("An unexpected error occurred during login.") from e

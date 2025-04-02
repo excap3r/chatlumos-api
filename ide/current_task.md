@@ -107,6 +107,17 @@
 -   [ ] Run `pytest` to evaluate test results after dependency fixes and code changes.
 -   [ ] Analyze `pytest` results and fix any remaining issues.
 
+## Task: Fix Failing Registration Tests
+
+- [x] Modify passwords in `test_register_success` and `test_register_duplicate` in `tests/api/test_auth_api.py` to include a special character.
+- [x] Update assertion in `test_register_invalid_password` in `tests/api/test_auth_api.py` to match the actual string error format.
+- [x] Re-run the specific registration tests to confirm fixes.
+- [x] Fix `NameError: name 'InvalidCredentialsError' is not defined` in `services/user_service.py`.
+- [x] Fix `TypeError: create_user() got an unexpected keyword argument 'password_hash'` by correcting the arguments passed from `services/user_service.py` to the database `create_user` function.
+- [x] Re-run the specific registration tests to confirm fixes.
+- [x] Run the full `test_auth_api.py` suite.
+- [x] Run the full test suite (`pytest`) if auth tests pass.
+
 ## Next Steps:
 1. Run the test suite to check if all dependencies are working correctly
 2. Update any code that was using `faiss-cpu` to use `annoy` instead

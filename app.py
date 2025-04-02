@@ -41,8 +41,9 @@ from services.api.routes.docs import docs_bp
 from services.api.routes.root import root_bp
 
 # Import error handling utilities
-from services.utils.error_utils import APIError, format_error_response
+from services.utils.error_utils import APIError, ValidationError, format_error_response
 from werkzeug.exceptions import NotFound
+from pydantic import ValidationError as PydanticValidationError
 
 # Import Service Classes for Initialization
 # from services.db.user_db import UserDB # Removed obsolete import
@@ -246,6 +247,42 @@ def create_app(config_object=AppConfig):
                              method=request.method)
         response_dict, status_code = format_error_response(error)
         return jsonify(response_dict), status_code
+
+    @app.errorhandler(ValidationError) # Custom ValidationError
+    def handle_validation_error(error: ValidationError):
+        """Handle custom ValidationErrors and return 400 JSON response."""
+        error_logger.warning("Validation Error occurred", 
+                             error_message=error.message, 
+                             status_code=400, 
+                             details=error.details, 
+                             exception_type=type(error).__name__,
+                             path=request.path,
+                             method=request.method)
+        response = {"error": error.message, "details": error.details}
+        return jsonify(response), 400
+
+    @app.errorhandler(PydanticValidationError) # Pydantic's ValidationError
+    def handle_pydantic_validation_error(error: PydanticValidationError):
+        """Handle Pydantic ValidationErrors and return 400 JSON response."""
+        error_details = error.errors() # Get structured errors from Pydantic
+        error_logger.warning("Pydantic Validation Error occurred", 
+                             errors=error_details, 
+                             status_code=400, 
+                             exception_type=type(error).__name__,
+                             path=request.path,
+                             method=request.method)
+        # Format errors similarly to how Flask-Rebar or others might
+        formatted_errors = {}
+        for err in error_details:
+            loc = err.get('loc', ('unknown',))
+            field = loc[-1] if loc else 'unknown'
+            msg = err.get('msg', 'Invalid input')
+            if field not in formatted_errors:
+                formatted_errors[field] = []
+            formatted_errors[field].append(msg)
+            
+        response = {"error": formatted_errors} # Return structured validation errors
+        return jsonify(response), 400
 
     @app.errorhandler(NotFound) # Handle 404 Not Found
     def handle_not_found(error: NotFound):

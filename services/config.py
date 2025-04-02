@@ -61,15 +61,21 @@ class AppConfig:
     DEFAULT_LLM_PROVIDER = os.getenv('DEFAULT_LLM_PROVIDER', 'openai') # Default provider if none specified
     # LLM_CAPABILITIES_URL = os.getenv('LLM_CAPABILITIES_URL') # Optional external capabilities definition
 
-    # --- Vector Search (Pinecone & Embeddings) ---
-    PINECONE_API_KEY = os.getenv('PINECONE_API_KEY')
-    # Option 1: Serverless
-    PINECONE_CLOUD = os.getenv("PINECONE_CLOUD", "aws")
-    PINECONE_REGION = os.getenv("PINECONE_REGION", "us-east-1")
-    # Option 2: Pod-based (set PINECONE_ENVIRONMENT instead of CLOUD/REGION)
-    PINECONE_ENVIRONMENT = os.getenv("PINECONE_ENVIRONMENT") # e.g., 'gcp-starter' or your specific env
-    PINECONE_INDEX_NAME = os.getenv('PINECONE_INDEX_NAME', 'pdf-wisdom-index')
-    PINECONE_POD_TYPE = os.getenv("PINECONE_POD_TYPE", "s1.x1") # Default pod type if using pod spec
+    # --- Vector Search (Annoy & Embeddings) ---
+    # PINECONE_API_KEY = os.getenv('PINECONE_API_KEY') # Removed
+    # # Option 1: Serverless
+    # PINECONE_CLOUD = os.getenv(\"PINECONE_CLOUD\", \"aws\") # Removed
+    # PINECONE_REGION = os.getenv(\"PINECONE_REGION\", \"us-east-1\") # Removed
+    # # Option 2: Pod-based (set PINECONE_ENVIRONMENT instead of CLOUD/REGION)
+    # PINECONE_ENVIRONMENT = os.getenv(\"PINECONE_ENVIRONMENT\") # Removed
+    # PINECONE_INDEX_NAME = os.getenv('PINECONE_INDEX_NAME', 'pdf-wisdom-index') # Removed
+    # PINECONE_POD_TYPE = os.getenv(\"PINECONE_POD_TYPE\", \"s1.x1\") # Removed
+    
+    # Annoy Configuration
+    ANNOY_INDEX_PATH = os.getenv('ANNOY_INDEX_PATH', './data/vector_index.ann') # Default path
+    ANNOY_METRIC = os.getenv('ANNOY_METRIC', 'angular') # 'angular', 'euclidean', 'manhattan', 'hamming', 'dot'
+    ANNOY_NUM_TREES = int(os.getenv('ANNOY_NUM_TREES', '50'))
+    ANNOY_FILTER_SEARCH_K_MULTIPLIER = int(os.getenv('ANNOY_FILTER_SEARCH_K_MULTIPLIER', '10'))
 
     EMBEDDING_MODEL_NAME = os.getenv('EMBEDDING_MODEL_NAME', 'all-MiniLM-L6-v2')
     # Determine dimension automatically in VectorSearchService or set explicitly

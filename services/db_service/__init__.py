@@ -8,8 +8,8 @@ This package provides database operations for the PDF Wisdom Extractor:
 """
 
 from .db_service import (
-    initialize_database,
-    get_connection,
+    # initialize_database, # REMOVED: Initialization handled in create_app
+    # get_connection, # REMOVED: Session handled via app context
     create_document,
     update_document_status,
     create_document_chunk,
@@ -26,8 +26,8 @@ from .db_service import (
 )
 
 __all__ = [
-    'initialize_database',
-    'get_connection',
+    # 'initialize_database', # REMOVED
+    # 'get_connection', # REMOVED
     'create_document',
     'update_document_status',
     'create_document_chunk',

@@ -21,7 +21,15 @@ from pydantic import BaseModel, EmailStr, Field, validator, ValidationError as P
 from ..utils.auth_utils import create_token, decode_token, MissingSecretError, InvalidTokenError, ExpiredTokenError
 
 # Import User Service
-from ..user_service import register_new_user, login_user
+from ..user_service import (
+    register_new_user, 
+    login_user,
+    get_keys_for_user,
+    add_api_key,
+    remove_api_key,
+    get_all_users_list as service_get_all_users,
+    update_user_roles_by_id as service_update_user_roles
+)
 
 # Import specific exceptions used for flow control or specific responses
 from ..db.exceptions import UserAlreadyExistsError, InvalidCredentialsError, UserNotFoundError, DatabaseError
@@ -426,76 +434,105 @@ def validate():
     # No try/except needed here unless the decorator logic itself can fail unexpectedly
     # (which would be caught by the global 500 handler)
 
-@auth_bp.route("/keys", methods=["GET"])
+@auth_bp.route("/api-keys", methods=["GET"])
 @require_auth()
-def get_keys():
-    """Retrieves all active API keys for the authenticated user."""
+def get_api_keys():
+    """
+    Get all active API keys for the authenticated user.
+    
+    Returns:
+        200: List of API keys (key_id, name, created_at, last_used_at, is_active, key_prefix)
+        401: Unauthorized
+    """
     user_id = g.user['id']
     try:
-        # Call user service
-        api_keys = service_get_keys_for_user(user_id)
-        logger.debug("Retrieved API keys for user", user_id=user_id, count=len(api_keys))
-        # The service returns keys without the hash, suitable for response
-        return jsonify(api_keys)
-    except DatabaseError as e:
-        logger.error("Failed to retrieve API keys due to DB error", user_id=user_id, error=str(e), exc_info=True)
-        raise APIError("Failed to retrieve API keys.", status_code=500)
+        keys = get_keys_for_user(user_id)
+        # Convert datetime objects to ISO strings for JSON serialization
+        keys_serializable = [
+            {**key, 
+             'created_at': key['created_at'].isoformat() if key.get('created_at') else None, 
+             'last_used_at': key['last_used_at'].isoformat() if key.get('last_used_at') else None
+            } 
+            for key in keys
+        ]
+        return jsonify(keys_serializable), 200
     except Exception as e:
-        logger.error("Unexpected error retrieving API keys", user_id=user_id, error=str(e), exc_info=True)
-        raise APIError("An unexpected error occurred while retrieving API keys.", status_code=500)
+        logger.error("Failed to get API keys for user", user_id=user_id, error=str(e), exc_info=True)
+        raise APIError("Failed to retrieve API keys.", status_code=500)
 
-@auth_bp.route("/keys", methods=["POST"])
+@auth_bp.route("/api-keys", methods=["POST"])
 @require_auth()
-def create_key():
-    """Creates a new API key for the authenticated user."""
+def create_api_key_route():
+    """
+    Create a new API key for the authenticated user.
+    
+    Request Body:
+        name: Descriptive name for the key (required)
+        
+    Returns:
+        201: Key created successfully (includes the plain text key)
+        400: Bad request (missing name)
+        401: Unauthorized
+        500: Server error
+    """
     user_id = g.user['id']
     data = request.get_json()
-    key_name = data.get('name') if data else None
-
-    if not key_name:
-        logger.warning("API key creation attempt missing name", user_id=user_id)
-        raise ValidationError("Missing required field: name")
+    
+    if not data or not data.get('name'):
+        raise ValidationError("Missing required field: 'name'")
+        
+    key_name = data['name']
 
     try:
-        # Call user service to handle key generation, hashing, and storage
-        key_id, generated_key, created_ts = service_add_api_key(user_id, key_name)
-
-        logger.info("API Key created via service", user_id=user_id, key_id=key_id, key_name=key_name)
-        # Return the *plain text key* only once upon creation
+        key_id, plain_key, created_ts = add_api_key(user_id, key_name)
+        
         return jsonify({
-            "message": "API Key created successfully. Store this key securely, it will not be shown again.",
-            "api_key": generated_key,
+            "message": "API key created successfully. Store the key securely, it will not be shown again.",
             "key_id": key_id,
             "key_name": key_name,
-            "created_at_ts": created_ts
+            "api_key": plain_key, # Return the plain text key ONCE upon creation
+            "created_at_ts": created_ts # Return the timestamp
         }), 201
     except DatabaseError as e:
-        logger.error("Failed to create API key due to DB error", user_id=user_id, key_name=key_name, error=str(e), exc_info=True)
-        raise APIError("Failed to create API key.", status_code=500)
+        logger.error("Database error creating API key", user_id=user_id, key_name=key_name, error=str(e), exc_info=True)
+        raise APIError("Failed to store API key due to database error.", status_code=500)
     except Exception as e:
         logger.error("Unexpected error creating API key", user_id=user_id, key_name=key_name, error=str(e), exc_info=True)
-        raise APIError("An unexpected error occurred while creating the API key.", status_code=500)
+        raise APIError("Failed to create API key.", status_code=500)
+        
 
-@auth_bp.route("/keys/<key_id>", methods=["DELETE"])
+@auth_bp.route("/api-keys/<key_id>", methods=["DELETE"])
 @require_auth()
-def delete_key(key_id):
-    """Revokes (deletes) an API key belonging to the authenticated user."""
+def delete_api_key_route(key_id):
+    """
+    Delete (revoke) an API key.
+    
+    Path Parameters:
+        key_id: The ID of the key to delete.
+        
+    Returns:
+        204: Key deleted successfully
+        401: Unauthorized
+        404: Key not found or not owned by user
+        500: Server error
+    """
     user_id = g.user['id']
     try:
-        # Call user service to revoke the key
-        success = service_remove_api_key(user_id, key_id)
-
+        success = remove_api_key(user_id, key_id)
         if success:
-            logger.info("API Key revoked", user_id=user_id, key_id=key_id)
-            return '', 204 # No content response for successful deletion
+            return "", 204 # No Content
         else:
-            # If service returns False, it implies key not found for this user
-            logger.warning("API key deletion failed (not found or unauthorized)", user_id=user_id, key_id=key_id)
+            # Explicitly raise the 404 error for not found / permission denied
             raise APIError("API key not found or you do not have permission to delete it.", status_code=404)
-
+            
+    except APIError as e: # Catch the APIError we just raised (or others)
+        logger.warning("API Error during key deletion", user_id=user_id, key_id=key_id, status_code=e.status_code, error=e.message)
+        # Re-raise the caught APIError to be handled by the global handler
+        raise e 
     except DatabaseError as e:
-        logger.error("Failed to delete API key due to DB error", user_id=user_id, key_id=key_id, error=str(e), exc_info=True)
-        raise APIError("Failed to delete API key.", status_code=500)
+        logger.error("Database error deleting API key", user_id=user_id, key_id=key_id, error=str(e), exc_info=True)
+        raise APIError("Failed to delete API key due to database error.", status_code=500)
     except Exception as e:
         logger.error("Unexpected error deleting API key", user_id=user_id, key_id=key_id, error=str(e), exc_info=True)
-        raise APIError("An unexpected error occurred while deleting the API key.", status_code=500) 
+        # Ensure this generic handler doesn't accidentally catch the APIError raised above
+        raise APIError("An unexpected server error occurred while deleting the API key.", status_code=500) 
