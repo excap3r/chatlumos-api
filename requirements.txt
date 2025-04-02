@@ -6,8 +6,8 @@ PyPDF2==3.0.0
 PyMySQL==1.1.1 # SQLAlchemy driver
 SQLAlchemy==2.0.31 # ORM
 Alembic==1.13.2 # Migrations
-python-dotenv==0.20.0
-requests==2.27.1
+python-dotenv==1.0.1
+requests==2.32.3
 tqdm==4.64.0
 numpy==1.26.4
 
@@ -16,34 +16,35 @@ tiktoken==0.4.0 # Optional but recommended for token counting
 
 # Vector Database
 pinecone==6.0.2
-torch==2.6.0 # Note: Consider CPU/GPU specific versions if needed
-sentence-transformers==2.2.2
+torch==2.3.0
+sentence-transformers==2.7.0
 
 # Translation & Language
 deep-translator==1.10.1
 
 # API Server & Framework
-Flask==2.0.1
-Flask-CORS==3.0.10
+Flask==3.0.3
+Flask-Cors==4.0.1
+Werkzeug==3.0.3
 gunicorn==20.1.0
 gevent==24.2.1 # For Gunicorn worker type
 
 # Input Validation
-pydantic==2.10.1 # Added for robust input validation
+pydantic==2.7.4 # Added for robust input validation
 
 # Caching
-redis==4.6.0
+redis==5.0.4
 
 # Logging
-structlog==23.1.0
+structlog==24.2.0
 
 # Visualization (If used)
 plotly==5.10.0
 pandas==2.2.2
 
 # Testing Framework
-pytest==7.0.0
-pytest-mock==3.10.0
+pytest==8.2.2
+pytest-mock==3.14.0
 pytest-cov==4.0.0
 pytest-asyncio==0.20.0
 pytest-flask==1.2.0
@@ -52,7 +53,7 @@ pytest-flask==1.2.0
 fakeredis[json]==2.24.0 # Use [json] extra for JSON command support
 
 # Background Task Processing
-celery[redis]==5.3.6 # Pinned version 
+celery==5.4.0
 
 # Documentation Generation
 mkdocs
@@ -64,4 +65,7 @@ ssrf-filter
 
 # Added for async event loop optimization
 uvloop
-uvicorn 
+uvicorn
+
+# Added Swagger UI
+flask-swagger-ui==5.11 

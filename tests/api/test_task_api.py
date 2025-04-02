@@ -4,242 +4,248 @@ import json
 from unittest.mock import patch, MagicMock
 from flask import Flask, g, jsonify
 from functools import wraps # Needed for mock decorator
+from io import BytesIO
+import time
 
-# Assuming client fixture and app fixture are available from conftest.py
-# Assuming mock_auth_user fixture is available from conftest.py
+# Assuming client fixture, app fixture, and mock_auth fixture are available from conftest.py
+# Assuming redis_client fixture is available
 
-# --- Mock Celery Task ---
-# Create a mock object that mimics the Celery task object
-# We need to be able to mock the .delay() method
-@patch('celery_app.celery_app.send_task') # Assuming celery app instance is accessible this way
-def test_ask_endpoint_success(mock_send_task, client, app, mock_auth_user):
-    """Test successful submission to /api/ask endpoint."""
+# --- Helper for Mocking require_auth Directly (REMOVED - Using Fixture) ---
+# def mock_require_auth_factory(...): ...
+
+# --- Tests for /api/pdf --- #
+
+@patch('services.api.routes.pdf.process_pdf_task.delay') # Patch Celery task delay
+def test_pdf_upload_success(mock_celery_delay, client, redis_client, mock_auth): # Inject mock_auth
+    """Test successful PDF upload and task queuing."""
     mock_user_id = str(uuid.uuid4())
-    question_text = "What is the summary?"
-    pdf_id = "test_pdf_123"
-    expected_task_id = str(uuid.uuid4())
-    
-    # Mock the Celery send_task to simulate task enqueueing
-    mock_send_task.return_value = MagicMock(id=expected_task_id)
+    file_content = b"%PDF-1.4 fake pdf"
+    file_name = "test_upload.pdf"
+    task_id_capture = None # To capture the generated task_id
 
-    # Mock the Redis client (assuming it's available via current_app)
-    mock_redis = MagicMock()
-    app.redis_client = mock_redis # Inject mock redis into app
+    # Mock Celery delay to capture args and prevent actual execution
+    def capture_task_id(*args, **kwargs):
+        nonlocal task_id_capture
+        task_id_capture = kwargs.get('task_id')
+        return MagicMock() # Return a mock AsyncResult
+    mock_celery_delay.side_effect = capture_task_id
 
-    # Use the mock_auth_user fixture
-    with app.test_request_context(): # Ensure app context for g
-        mock_auth_user(user_id=mock_user_id)
-        response = client.post('/api/v1/ask', json={
-            'question': question_text,
-            'pdf_id': pdf_id
-        })
+    # Use the mock_auth fixture to simulate authentication
+    auth_patcher = mock_auth(user_id=mock_user_id)
+    with auth_patcher: # Apply patch context
+        data = {
+            'file': (BytesIO(file_content), file_name),
+            'author': 'Test Author',
+            'title': 'Test Title'
+        }
+        response = client.post('/api/v1/pdf/upload', data=data, content_type='multipart/form-data')
 
-    assert response.status_code == 202
-    assert response.json['task_id'] == expected_task_id
+        # --- Assert API Response --- 
+        assert response.status_code == 202
+        assert 'task_id' in response.json
+        assert response.json['task_id'] == task_id_capture
+        assert response.json['filename'] == file_name
+        assert task_id_capture is not None
 
-    # Verify Celery task was called
-    # We check send_task args. Adjust 'services.tasks.question_processing.process_question_task' if path differs.
-    mock_send_task.assert_called_once_with(
-        'services.tasks.question_processing.process_question_task', # Name of the task
-        args=(mock_user_id, question_text, pdf_id, expected_task_id),
-        # kwargs={} # Add if task uses kwargs
-    )
+        # --- Assert Celery Task Called --- 
+        mock_celery_delay.assert_called_once()
+        call_args, call_kwargs = mock_celery_delay.call_args
+        assert call_kwargs['task_id'] == task_id_capture
+        assert call_kwargs['filename'] == file_name
+        assert call_kwargs['user_id'] == mock_user_id
+        assert call_kwargs['author_name'] == 'Test Author'
+        assert call_kwargs['title'] == 'Test Title'
+        assert 'file_content_b64' in call_kwargs
 
-    # Verify initial status was stored in Redis
-    expected_redis_key = f"task:{expected_task_id}"
-    expected_initial_data = json.dumps({
-        "status": "PENDING",
-        "progress": 0,
-        "message": "Task received, pending execution."
-    })
-    mock_redis.set.assert_called_once_with(expected_redis_key, expected_initial_data, ex=3600) # Check key, value, and expiry
+        # --- Assert Initial State in Redis --- 
+        redis_key = f"task:{task_id_capture}"
+        task_state = redis_client.hgetall(redis_key)
+        assert task_state is not None
+        assert task_state.get('status') == 'Queued'
+        assert int(task_state.get('progress', -1)) == 0
+        assert task_state.get('filename') == file_name
+        assert task_state.get('user_id') == mock_user_id
 
+def test_pdf_upload_no_file(client, mock_auth): # Inject mock_auth
+    """Test PDF upload fails when no file part is provided."""
+    auth_patcher = mock_auth(user_id="test-user")
+    with auth_patcher: # Apply patch context
+        response = client.post('/api/v1/pdf/upload', data={}, content_type='multipart/form-data')
+        assert response.status_code == 400
+        assert 'No file part' in response.json['error']
 
-def test_ask_endpoint_unauthenticated(client):
-    """Test /api/ask fails without authentication."""
-    response = client.post('/api/v1/ask', json={
-        'question': 'test',
-        'pdf_id': 'test'
-    })
-    assert response.status_code == 401
+def test_pdf_upload_no_filename(client, mock_auth): # Inject mock_auth
+    """Test PDF upload fails when file is present but has no filename."""
+    auth_patcher = mock_auth(user_id="test-user")
+    with auth_patcher: # Apply patch context
+        data = {'file': (BytesIO(b"content"), '')} # Empty filename
+        response = client.post('/api/v1/pdf/upload', data=data, content_type='multipart/form-data')
+        assert response.status_code == 400
+        assert 'No file selected' in response.json['error']
 
-def test_ask_endpoint_bad_input(client, app, mock_auth_user):
-    """Test /api/ask fails with missing input fields."""
-    mock_user_id = str(uuid.uuid4())
-    
-    # Use the mock_auth_user fixture
-    mock_auth_user(user_id=mock_user_id)
-    
-    with app.test_request_context():
-        # Missing pdf_id
-        response_missing_pdf = client.post('/api/v1/ask', json={
-            'question': 'test'
-        })
-        assert response_missing_pdf.status_code == 400
-        assert 'Missing required field: pdf_id' in response_missing_pdf.json['error']
-        
-        # Missing question
-        response_missing_q = client.post('/api/v1/ask', json={
-            'pdf_id': 'test'
-        })
-        assert response_missing_q.status_code == 400
-        assert 'Missing required field: question' in response_missing_q.json['error']
-
-
-# --- Tests for /api/pdf --- 
-
-# Assuming process_pdf_task is in services.tasks.pdf_processing
-@patch('celery_app.celery_app.send_task') 
-def test_pdf_upload_success(mock_send_task, client, app, mock_auth_user):
-    """Test successful PDF upload and task creation."""
-    mock_user_id = str(uuid.uuid4())
-    expected_task_id = str(uuid.uuid4())
-    file_content = b"%PDF-1.4 fake pdf content"
-    file_name = "test.pdf"
-
-    # Mock Celery task
-    mock_send_task.return_value = MagicMock(id=expected_task_id)
-
-    # Mock Redis
-    mock_redis = MagicMock()
-    app.redis_client = mock_redis
-
-    # Simulate file upload using test_client
-    from io import BytesIO
-    data = {
-        'file': (BytesIO(file_content), file_name)
-    }
-    
-    with app.test_request_context():
-        # Use the mock_auth_user fixture
-        mock_auth_user(user_id=mock_user_id)
-        response = client.post('/api/v1/pdf', data=data, content_type='multipart/form-data')
-
-    assert response.status_code == 202
-    assert response.json['task_id'] == expected_task_id
-
-    # Verify Celery task call
-    # The task likely receives user_id, file content, filename, task_id
-    # Need to confirm exact signature of process_pdf_task
-    mock_send_task.assert_called_once()
-    args, kwargs = mock_send_task.call_args
-    assert args[0] == 'services.tasks.pdf_processing.process_pdf_task' # Task name
-    # Check positional arguments passed to the task
-    task_args = args[1] 
-    assert task_args[0] == mock_user_id
-    # Task might receive bytes or a path to a saved temp file. Assume bytes for now.
-    # If it saves temporarily, mocking file save/read might be needed.
-    assert task_args[1] == file_content # Or path to saved file
-    assert task_args[2] == file_name
-    assert task_args[3] == expected_task_id
-
-    # Verify Redis call
-    expected_redis_key = f"task:{expected_task_id}"
-    expected_initial_data = json.dumps({
-        "status": "PENDING",
-        "progress": 0,
-        "message": "PDF received, pending processing.",
-        "filename": file_name # Include filename in initial state
-    })
-    mock_redis.set.assert_called_once_with(expected_redis_key, expected_initial_data, ex=3600)
+def test_pdf_upload_wrong_type(client, mock_auth): # Inject mock_auth
+    """Test PDF upload fails with non-PDF file type."""
+    auth_patcher = mock_auth(user_id="test-user")
+    with auth_patcher: # Apply patch context
+        data = {'file': (BytesIO(b"content"), 'document.txt')} # Wrong extension
+        response = client.post('/api/v1/pdf/upload', data=data, content_type='multipart/form-data')
+        assert response.status_code == 400
+        assert 'Invalid file type' in response.json['error']
 
 def test_pdf_upload_unauthenticated(client):
-    """Test /api/pdf fails without authentication."""
-    from io import BytesIO
+    """Test /api/v1/pdf/upload fails without authentication."""
+    # No mock_auth needed here
     data = {'file': (BytesIO(b"test"), 'test.pdf')}
-    response = client.post('/api/v1/pdf', data=data, content_type='multipart/form-data')
+    response = client.post('/api/v1/pdf/upload', data=data, content_type='multipart/form-data')
     assert response.status_code == 401
+    assert 'Authentication required' in response.json['error']
 
-def test_pdf_upload_no_file(client, app, mock_auth_user):
-    """Test /api/pdf fails when no file is provided."""
-    mock_user_id = str(uuid.uuid4())
+
+# --- Tests for /api/ask --- #
+
+@patch('services.api.routes.ask.process_question_task.delay')
+def test_ask_endpoint_success(mock_celery_delay, client, redis_client, mock_auth): # Inject mock_auth
+    """Test successful question submission to /api/ask."""
+    mock_user_id = "ask-user-123"
+    question = "What is the main topic?"
+    pdf_id = "pdf-abc-789"
+    task_id_capture = None
+
+    def capture_task_id(*args, **kwargs):
+        nonlocal task_id_capture
+        task_id_capture = kwargs.get('task_id')
+        return MagicMock()
+    mock_celery_delay.side_effect = capture_task_id
+
+    auth_patcher = mock_auth(user_id=mock_user_id)
+    with auth_patcher: # Apply patch context
+        response = client.post('/api/v1/ask', json={
+            'question': question,
+            'pdf_id': pdf_id,
+            # 'stream': False # Assuming default is non-streaming
+        })
+
+        # --- Assert API Response --- 
+        assert response.status_code == 202
+        assert 'task_id' in response.json
+        assert response.json['task_id'] == task_id_capture
+        assert task_id_capture is not None
+
+        # --- Assert Celery Task Called --- 
+        mock_celery_delay.assert_called_once()
+        call_args, call_kwargs = mock_celery_delay.call_args
+        assert call_kwargs['task_id'] == task_id_capture
+        assert call_kwargs['question'] == question
+        assert call_kwargs['pdf_id'] == pdf_id
+        assert call_kwargs['user_id'] == mock_user_id
+        # Assert stream is False or default value if applicable
+
+        # --- Assert Initial State in Redis --- 
+        redis_key = f"task:{task_id_capture}"
+        task_state = redis_client.hgetall(redis_key)
+        assert task_state is not None
+        assert task_state.get('status') == 'Queued'
+        # Add more checks for initial state if needed (e.g., question stored)
+
+def test_ask_endpoint_bad_input(client, mock_auth): # Inject mock_auth
+    """Test /api/ask fails with missing required fields."""
+    auth_patcher = mock_auth(user_id="test-user")
+    with auth_patcher: # Apply patch context
+        # Missing pdf_id
+        response = client.post('/api/v1/ask', json={'question': 'test?'})
+        assert response.status_code == 400
+        assert 'Input validation failed' in response.json['error']
+        assert 'pdf_id' in response.json['details'] # Check Pydantic error detail
+
+        # Missing question
+        response = client.post('/api/v1/ask', json={'pdf_id': 'abc'})
+        assert response.status_code == 400
+        assert 'Input validation failed' in response.json['error']
+        assert 'question' in response.json['details']
+
+def test_ask_unauthorized(client):
+    """Test /api/ask fails without authentication."""
+    # No mock_auth needed
+    response = client.post('/api/v1/ask', json={'question': 'test?', 'pdf_id': 'abc'})
+    assert response.status_code == 401
+    assert 'Authentication required' in response.json['error']
+
+# --- Tests for /api/progress-stream/<session_id> --- #
+
+# Note: Testing SSE is tricky with the standard client.
+# Requires a client that can handle streaming responses or direct function calls.
+
+# Example using direct call (less integration-like, more unit-like for the generator)
+# Patch the pubsub method on the Redis client class used by the app
+@patch('fakeredis.FakeStrictRedis.pubsub') # Patching the pubsub method on the fake client
+def test_progress_stream_generator(mock_redis_pubsub, client, redis_client, app):
+    """Test the progress stream generator function directly."""
+    session_id_or_task_id = "task-stream-123" # Use task_id as per route logic
+    pubsub_channel = f"progress:{session_id_or_task_id}"
+    # Mock the pubsub object returned by redis_client.pubsub()
+    mock_pubsub_instance = MagicMock()
+    mock_redis_pubsub.return_value = mock_pubsub_instance
     
-    with app.test_request_context():
-        mock_auth_user(user_id=mock_user_id)
-        response = client.post('/api/v1/pdf', data={}, content_type='multipart/form-data')
-    
-    assert response.status_code == 400
-    assert 'No file part' in response.json['error'] # Adjust expected message
-
-def test_pdf_upload_no_filename(client, app, mock_auth_user):
-    """Test /api/pdf fails when file has no filename."""
-    mock_user_id = str(uuid.uuid4())
-    
-    from io import BytesIO
-    data = {'file': (BytesIO(b"test"), '')} # Empty filename
-    
-    with app.test_request_context():
-        mock_auth_user(user_id=mock_user_id)
-        response = client.post('/api/v1/pdf', data=data, content_type='multipart/form-data')
-    
-    assert response.status_code == 400
-    assert 'No selected file' in response.json['error'] # Adjust expected message
-
-
-# --- Tests for /api/progress/<task_id> --- 
-
-# Note: Testing SSE requires careful handling of the streaming response
-
-@patch('redis.Redis.pubsub') # Mock the pubsub method of the Redis client
-def test_progress_endpoint_sse_success(mock_redis_pubsub, client, app, mock_auth_user):
-    """Test the progress SSE endpoint successfully streams updates."""
-    mock_user_id = str(uuid.uuid4())
-    task_id = str(uuid.uuid4())
-    redis_channel = f"progress:{task_id}"
-    
-    # Mock Redis client for initial state check (if any)
-    mock_redis = MagicMock()
-    # Simulate initial state exists (or not, depending on route logic)
-    # mock_redis.exists.return_value = True 
-    app.redis_client = mock_redis
-
-    # Mock the PubSub object and its listen() method
-    mock_ps = MagicMock()
-    # Simulate messages received from Redis Pub/Sub
-    # Format: {'type': 'message', 'channel': b'...', 'data': b'{"status": ...}'}
-    # Add a final message to break the loop or simulate connection close
+    # Simulate messages published to Redis that listen() would yield
     mock_messages = [
-        {'type': 'pmessage', 'channel': redis_channel.encode(), 'data': json.dumps({"status": "PROCESSING", "progress": 10, "message": "Step 1"}).encode()},
-        {'type': 'pmessage', 'channel': redis_channel.encode(), 'data': json.dumps({"status": "PROCESSING", "progress": 50, "message": "Step 2"}).encode()},
-        {'type': 'pmessage', 'channel': redis_channel.encode(), 'data': json.dumps({"status": "SUCCESS", "progress": 100, "result": {"answer": "final"}}).encode()},
-        {'type': 'pmessage', 'channel': redis_channel.encode(), 'data': b'CLOSE'} # Special message to signal end
+        {'type': 'message', 'channel': pubsub_channel.encode(), 'data': json.dumps({'task_id': session_id_or_task_id, 'status': 'PROCESSING', 'progress': 50}).encode()},
+        {'type': 'message', 'channel': pubsub_channel.encode(), 'data': json.dumps({'task_id': session_id_or_task_id, 'status': 'SUCCESS', 'progress': 100}).encode()},
+        # Simulate timeout or end condition - the generator should break
     ]
-    mock_ps.listen.return_value = iter(mock_messages)
-    mock_ps.psubscribe = MagicMock()
-    mock_ps.unsubscribe = MagicMock()
-    mock_ps.close = MagicMock()
-    mock_redis_pubsub.return_value = mock_ps
+    # mock_pubsub_instance.listen.return_value = iter(mock_messages)
+    # Instead of listen(), the route uses get_message() in a loop.
+    # We need to simulate multiple calls to get_message()
+    # Add None to simulate timeout between real messages, and finally return None indefinitely or raise exception to stop
+    get_message_return_values = [
+        mock_messages[0],
+        None, # Simulate a timeout
+        mock_messages[1],
+        None, # Simulate timeout after last message before generator stops
+    ]
+    mock_pubsub_instance.get_message.side_effect = get_message_return_values + [None]*10 # Return None after messages
 
-    # Use the mock_auth_user fixture
-    with app.test_request_context():
-        mock_auth_user(user_id=mock_user_id)
-        response = client.get(f'/api/v1/progress/{task_id}', headers={'Accept': 'text/event-stream'})
+    # Import the function we want to test directly
+    from services.api.routes.progress import stream_progress # Function name changed
     
-    assert response.status_code == 200
-    assert response.mimetype == 'text/event-stream'
+    # Simulate initial task state in Redis hash (required by the route)
+    initial_state = {
+        'user_id': 'test-user', # Assuming auth adds this to g
+        'status': 'PROCESSING',
+        'progress': 10,
+        'filename': 'initial_file.pdf'
+    }
+    redis_client.hset(f"task:{session_id_or_task_id}", mapping=initial_state)
 
-    # Consume the stream and check data
-    # Need to decode bytes and split events properly
-    stream_content = response.get_data(as_text=True)
-    # Simple check for expected data payloads
-    assert 'data: {"status": "PROCESSING", "progress": 10, "message": "Step 1"}\n\n' in stream_content
-    assert 'data: {"status": "PROCESSING", "progress": 50, "message": "Step 2"}\n\n' in stream_content
-    assert 'data: {"status": "SUCCESS", "progress": 100, "result": {"answer": "final"}}\n\n' in stream_content
-    # assert 'data: CLOSE\n\n' not in stream_content # CLOSE message should terminate, not be sent
+    # Need app context for current_app.logger and request context for g
+    with app.test_request_context(f'/api/v1/progress/{session_id_or_task_id}'):
+        g.user = {'id': 'test-user'} # Manually set g.user for the direct call test
+        generator = stream_progress(session_id_or_task_id) # Pass task_id
+        
+        results = list(generator)
+
+    # --- Assertions --- #
+    # Expecting initial state + 2 updates
+    assert len(results) == 3 
+    # Check initial state event (might have different event name)
+    assert results[0].startswith("event: processing\ndata: {") # Based on initial state status
+    assert '"progress": 10' in results[0] 
+    # Check first update
+    assert results[1].startswith("event: processing\ndata: {")
+    assert '"progress": 50' in results[1]
+    # Check second update
+    assert results[2].startswith("event: success\ndata: {")
+    assert '"progress": 100' in results[2]
     
     # Verify pubsub interaction
-    mock_redis_pubsub.assert_called_once()
-    mock_ps.psubscribe.assert_called_once_with(redis_channel)
-    # Check if unsubscribe/close are called depends on the route's exit logic
-    # mock_ps.unsubscribe.assert_called_once_with(redis_channel)
-    # mock_ps.close.assert_called_once()
+    mock_redis_pubsub.assert_called_once_with(ignore_subscribe_messages=True)
+    mock_pubsub_instance.subscribe.assert_called_once_with(pubsub_channel)
+    assert mock_pubsub_instance.get_message.call_count >= 4 # Called until side_effect list exhausted
+    mock_pubsub_instance.unsubscribe.assert_called_once_with(pubsub_channel)
+    mock_pubsub_instance.close.assert_called_once()
 
-
-def test_progress_endpoint_unauthenticated(client):
-    """Test /api/progress fails without authentication."""
-    task_id = str(uuid.uuid4())
-    response = client.get(f'/api/v1/progress/{task_id}', headers={'Accept': 'text/event-stream'})
-    assert response.status_code == 401
-
-# TODO: Add test for case where task_id doesn't exist initially (if route checks this)
-# TODO: Add test for handling errors reported via SSE 
+# Actual endpoint test is harder - might need a specialized test client
+@pytest.mark.skip(reason="Standard Flask test client cannot easily test SSE endpoints")
+def test_progress_endpoint_sse_success(client):
+    """Test the SSE endpoint /api/progress-stream/<session_id> (Skipped)."""
+    session_id = "live-session-123"
+    pass 

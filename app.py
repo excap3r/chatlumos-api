@@ -51,8 +51,24 @@ from services.vector_search.vector_search import VectorSearchService
 from services.analytics.analytics_service import AnalyticsService
 from services.analytics.webhooks.webhook_service import WebhookService
 
+# Import flask-swagger-ui
+from flask_swagger_ui import get_swaggerui_blueprint
+
 # Initialize logger early for potential issues during import or setup
 logger = structlog.get_logger(__name__)
+
+# --- Swagger UI Setup --- #
+SWAGGER_URL = '/api/v1/docs'  # URL for exposing Swagger UI (must be Blueprint prefix + /docs)
+API_URL = '/api/v1/swagger.json'  # Our API url (must be Blueprint prefix + /swagger.json)
+
+# Call factory function to create our blueprint
+swaggerui_blueprint = get_swaggerui_blueprint(
+    SWAGGER_URL,
+    API_URL,
+    config={
+        'app_name': "PDF Wisdom Extractor API Docs"
+    }
+)
 
 def create_app(config_object=AppConfig):
     """Factory function to create and configure the Flask application."""
@@ -126,6 +142,13 @@ def create_app(config_object=AppConfig):
     api_version = app.config.get('API_VERSION', 'v1')
     api_prefix = f"/api/{api_version}"
 
+    # Register the JSON spec endpoint FIRST (from docs.py)
+    app.register_blueprint(docs_bp, url_prefix=api_prefix)
+    
+    # Register the Swagger UI blueprint (serves the HTML page)
+    app.register_blueprint(swaggerui_blueprint, url_prefix=SWAGGER_URL) # Use SWAGGER_URL as prefix
+    
+    # Register other API blueprints
     app.register_blueprint(auth_bp, url_prefix=f'{api_prefix}/auth')
     app.register_blueprint(analytics_bp, url_prefix=f'{api_prefix}/analytics')
     app.register_blueprint(webhook_bp, url_prefix=f'{api_prefix}/webhooks')
@@ -136,9 +159,8 @@ def create_app(config_object=AppConfig):
     app.register_blueprint(search_bp, url_prefix=api_prefix)
     app.register_blueprint(pdf_bp, url_prefix=api_prefix)
     app.register_blueprint(question_bp, url_prefix=api_prefix)
-    app.register_blueprint(docs_bp, url_prefix=api_prefix)
     app.register_blueprint(root_bp) # Root blueprint has no prefix
-    logger.info("API blueprints registered.", api_prefix=api_prefix)
+    logger.info("API blueprints registered.", api_prefix=api_prefix, swagger_url=SWAGGER_URL)
 
 
     # --- Service Initialization --- #

@@ -89,7 +89,13 @@ def register():
         if not payload:
             raise ValidationError("Request body cannot be empty.")
         
-        user_data = UserRegistrationSchema.model_validate(payload)
+        # Explicitly handle Pydantic validation errors here
+        try:
+            user_data = UserRegistrationSchema.model_validate(payload)
+        except PydanticValidationError as e:
+            logger.warning("Registration validation failed", errors=e.errors())
+            raise ValidationError(f"Input validation failed: {e.errors()}")
+
         username = user_data.username
         email = user_data.email
         password = user_data.password
@@ -106,12 +112,20 @@ def register():
 
     except UserAlreadyExistsError as e:
         logger.warning("Registration failed: User already exists", username=username, email=email)
-        response, status_code = format_error_response(e)
-        return jsonify(response), status_code
+        # Use the existing APIError handling mechanism if format_error_response isn't defined/imported
+        raise APIError(str(e), status_code=409)
+        # response, status_code = format_error_response(e) # Assumes format_error_response exists and works
+        # return jsonify(response), status_code
 
     except DatabaseError as e: # Catch potential DB errors during user creation
         logger.error("Database error during registration", username=username, error=str(e), exc_info=True)
         raise APIError("Failed to register user due to a database issue.", status_code=500)
+    
+    # Catch our custom ValidationError raised above or from empty payload check
+    except ValidationError as e:
+        logger.warning("Registration validation error", message=e.message)
+        # Re-raise to be caught by the global handler (which should return 400)
+        raise e
 
     except Exception as e: # Generic catch-all for unexpected errors
         logger.error("Unexpected error during registration", username=username if 'username' in locals() else 'unknown', error=str(e), exc_info=True)
