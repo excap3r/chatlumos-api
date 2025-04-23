@@ -50,17 +50,24 @@ def search_route():
         raise ValidationError("'query' field is required and must be a string")
     
     # --- Get optional parameters and validate --- 
-    index_name = data.get("index_name", AppConfig.PINECONE_INDEX_NAME) # Use AppConfig default
+    # index_name = data.get("index_name", AppConfig.PINECONE_INDEX_NAME) # OLD: Use AppConfig default for Pinecone
+    # NEW: Use Annoy index path from config. Assume downstream service handles this.
+    # We might need to rename the key in the payload later if the vector service expects "index_path".
+    index_path_or_name = AppConfig.ANNOY_INDEX_PATH 
     
     try:
         top_k_raw = data.get("top_k")
         if top_k_raw is not None:
-            top_k = int(top_k_raw)
+            # Check if it's an integer first
+            if not isinstance(top_k_raw, int):
+                raise ValidationError("'top_k' must be a valid integer")
+            top_k = int(top_k_raw) # Now safe to convert
             if top_k <= 0:
                 raise ValidationError("'top_k' must be a positive integer")
         else:
             top_k = AppConfig.DEFAULT_TOP_K # Use AppConfig default
     except (ValueError, TypeError):
+        # This catch might be redundant now but keep for safety
         raise ValidationError("'top_k' must be a valid integer")
 
     metadata_filter = data.get("metadata_filter") # Optional filter
@@ -68,7 +75,7 @@ def search_route():
          raise ValidationError("'metadata_filter' must be a dictionary (object) if provided")
     # --- End validation --- 
     
-    logger.info(f"Received search request: '{query[:50]}...' (top_k={top_k}, index={index_name})")
+    logger.info(f"Received search request: '{query[:50]}...' (top_k={top_k}, index={index_path_or_name})")
     
     if not api_gateway:
         logger.error("API Gateway service not available for search route.")
@@ -78,7 +85,7 @@ def search_route():
         # Prepare payload for the vector service search endpoint
         search_payload = {
             "query": query,
-            "index_name": index_name,
+            "index_name": index_path_or_name,
             "top_k": top_k
         }
         if metadata_filter:
@@ -105,7 +112,7 @@ def search_route():
             except (ValueError, TypeError):
                  logger.warning(f"Invalid status_code '{status_code_raw}' in error response body, using 500.")
             
-            logger.warning(f"Vector service search returned an error in response body: {error_msg}", status_code=status_code)
+            logger.warning(f"Vector service search returned an error in response body: {error_msg}")
             # Raise APIError based on the service's response - This pattern is fragile.
             raise APIError(f"Search service failed: {error_msg}", status_code=status_code)
 
@@ -117,7 +124,7 @@ def search_route():
             logger.info(f"Search successful, found {len(results.get('results', []))} results.")
             return response
         except (TypeError, ValueError) as json_err:
-             logger.error(f"Failed to serialize search results from vector service: {json_err}", results_type=type(results).__name__)
+             logger.error(f"Failed to serialize search results from vector service: {json_err}")
              raise APIError("Search service returned unserializable data.", 500)
     
     except ServiceError as e:
@@ -125,6 +132,8 @@ def search_route():
         logger.error(f"ServiceError during search communication: {str(e)}")
         # Raise APIError, using status code from ServiceError if available
         raise APIError(f"Failed to communicate with search service: {e}", status_code=getattr(e, 'status_code', 503))
+    except APIError as api_err: # Catch specific API errors raised within the main try block
+        raise api_err # Re-raise to let handlers manage it
     except Exception as e:
         # Catchall for unexpected errors in this route handler
         logger.error(f"Unexpected error during search route: {str(e)}", exc_info=True)

@@ -29,9 +29,9 @@ structlog.configure(
         structlog.processors.dict_tracebacks, # Formats tracebacks nicely
         structlog.processors.UnicodeDecoder(), # Decodes unicode strings
         # Add context variables (like request_id) if set via structlog.contextvars
-        structlog.contextvars.merge_contextvars, 
+        structlog.contextvars.merge_contextvars,
         # Final step: Render the event dictionary to JSON
-        structlog.processors.JSONRenderer() 
+        structlog.processors.JSONRenderer()
     ],
     # Use standard logging infrastructure for output
     wrapper_class=structlog.stdlib.BoundLogger,
@@ -49,15 +49,15 @@ def setup_standard_logging(log_file: Optional[str] = None, level: int = logging.
     # Configure root logger handler
     root_logger = logging.getLogger()
     root_logger.setLevel(level)
-    
+
     # Clear existing handlers (important for reconfiguration)
-    root_logger.handlers.clear() 
+    root_logger.handlers.clear()
 
     # Create console handler (writes JSON formatted by structlog)
     console_handler = logging.StreamHandler(sys.stdout)
     # No formatter needed here, structlog handles the formatting
     root_logger.addHandler(console_handler)
-    
+
     # Add file handler if log_file provided
     if log_file:
         log_dir = os.path.dirname(log_file)
@@ -69,7 +69,7 @@ def setup_standard_logging(log_file: Optional[str] = None, level: int = logging.
                 if not os.path.isdir(log_dir):
                     logging.getLogger(__name__).error(f"Failed to create log directory: {log_dir}", exc_info=True)
                     raise e
-                    
+
         try:
             file_handler = logging.FileHandler(log_file)
             # No formatter needed
@@ -84,24 +84,24 @@ def setup_standard_logging(log_file: Optional[str] = None, level: int = logging.
 
 def setup_logger(name: str, log_file: Optional[str] = None, level: int = logging.INFO) -> structlog.stdlib.BoundLogger:
     """
-    DEPRECATED: Use setup_standard_logging() once at startup, 
+    DEPRECATED: Use setup_standard_logging() once at startup,
                  then structlog.get_logger() everywhere else.
-                 
+
     Sets up standard logging handlers and returns a structlog logger.
-    
+
     Args:
         name: Logger name (will be included in logs)
         log_file: Optional log file path for standard logging handler
         level: Logging level for standard logging handler
-        
+
     Returns:
         Configured structlog logger instance
     """
     # Ensure standard logging is configured (can be called multiple times, but ideally once)
     # Note: This approach might reconfigure handlers repeatedly if called often.
     # Better: Call setup_standard_logging() once at app startup.
-    setup_standard_logging(log_file=log_file, level=level) 
-    
+    setup_standard_logging(log_file=log_file, level=level)
+
     # Return a structlog logger bound to the name
     return structlog.get_logger(name)
 
@@ -114,10 +114,10 @@ def log_request(request: Request) -> None:
     Assumes structlog contextvars are used for request_id.
     """
     logger = structlog.get_logger('request_logger') # Get structlog logger
-    
+
     # Store request start time for calculating duration
     g.request_start_time = time.time()
-    
+
     # Extract request data safely
     request_data = None
     if request.is_json:
@@ -131,19 +131,20 @@ def log_request(request: Request) -> None:
 
     # Log request details as key-value pairs
     log_details = {
-        # request_id should be added via contextvars if used
+        # Include request_id from Flask g object if available
+        "request_id": getattr(g, 'request_id', None),
         "method": request.method,
         "url": request.url,
         "path": request.path,
         "remote_addr": request.remote_addr,
         "headers": dict(request.headers),
         "args": dict(request.args),
-        "body": request_data 
+        "body": request_data
     }
-    
+
     # Remove sensitive information
     if "Authorization" in log_details["headers"]:
-        log_details["headers"]["Authorization"] = "<redacted>"
+        del log_details["headers"]["Authorization"]
     # Redact other sensitive headers if needed (e.g., Cookies)
 
     logger.info("Incoming request", **log_details)
@@ -155,12 +156,12 @@ def log_response(response: Response) -> None:
     Assumes structlog contextvars are used for request_id.
     """
     logger = structlog.get_logger('request_logger') # Get structlog logger
-    
+
     # Calculate request duration
     duration_ms = None
     if hasattr(g, 'request_start_time'):
         duration_ms = (time.time() - g.request_start_time) * 1000 # Log duration in ms
-    
+
     # Extract response data safely - Limit size?
     response_data = None
     # Avoid loading large response bodies into memory/logs
@@ -168,9 +169,9 @@ def log_response(response: Response) -> None:
         try:
             if response.is_json:
                  response_data = json.loads(response.get_data(as_text=True))
-            # Add handling for other response types if needed (e.g., text)
-            # else:
-            #    response_data = response.get_data(as_text=True) 
+            # Add handling for other response types (e.g., text)
+            else:
+                response_data = response.get_data(as_text=True)
         except Exception:
             response_data = "<Non-JSON or Unparseable Response Body>"
     elif response.content_length is not None:
@@ -180,13 +181,14 @@ def log_response(response: Response) -> None:
 
     # Log response details
     log_details = {
-        # request_id from contextvars
+        # Include request_id from Flask g object if available
+        "request_id": getattr(g, 'request_id', None),
         "status_code": response.status_code,
         "duration_ms": duration_ms,
         "headers": dict(response.headers),
         "body": response_data
     }
-    
+
     logger.info("Outgoing response", **log_details)
 
 
@@ -212,18 +214,18 @@ def setup_request_logging(app):
         clear_contextvars()
         request_id = str(uuid.uuid4())
         g.request_id = request_id # Keep in g for potential use elsewhere
-        bind_contextvars(request_id=request_id) 
-        
+        bind_contextvars(request_id=request_id)
+
         from flask import request # Import request explicitly here
         log_request(request)
 
     @app.after_request
     def after_request_log(response):
         # Response logging happens before context is cleared
-        log_response(response) 
+        log_response(response)
         return response
 
     @app.teardown_request
     def teardown_request_log(exc=None):
         # Clear context after request is finished
-        clear_contextvars() 
+        clear_contextvars()

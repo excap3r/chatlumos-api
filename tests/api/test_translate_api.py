@@ -61,8 +61,7 @@ def test_translate_missing_text(client, mock_auth):
 
     assert response.status_code == 400
     assert 'error' in response.json
-    assert response.json['error'] == 'Validation Error'
-    assert "Missing required field: text" in response.json.get('message', '')
+    assert response.json['error'] == 'Missing required field: text'
 
 def test_translate_api_error(client, mock_auth):
     """Test error handling when deep-translator raises TranslationNotFound."""
@@ -129,4 +128,4 @@ def test_translate_unauthenticated(client):
 
     assert response.status_code == 401
     assert 'error' in response.json
-    assert response.json['error'] == 'Authentication required' 
+    assert response.json['error'] == 'Authentication required'

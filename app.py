@@ -89,6 +89,10 @@ def create_app(config_object=AppConfig):
     app.config.from_object(config_object)
     logger.info("Flask application configuration loaded.", config_env=os.getenv('FLASK_ENV', 'default'))
 
+    # --- Initialize JWT Manager --- #
+    JWTManager(app)
+    logger.info("JWTManager initialized.")
+
     # --- Initialize Structured Logging --- #
     initialize_logging(log_level_name=app.config.get('LOG_LEVEL', 'INFO')) 
     setup_request_logging(app) # Set up before/after request hooks
@@ -307,8 +311,23 @@ def create_app(config_object=AppConfig):
     def handle_generic_exception(error: Exception):
         """Handle unexpected non-HTTP exceptions and return a generic 500 error.
         HTTPExceptions are handled by the dedicated `handle_http_exception`.
+        APIError instances should ideally be caught by `handle_api_error`, 
+        but if they reach here (e.g., due to middleware re-raising), handle them specifically.
         """
-        # For non-HTTP exceptions, log as 500 and return generic message
+        # Check if the caught exception is actually an APIError
+        if isinstance(error, APIError):
+            # Delegate to the specific APIError handler logic
+            error_logger.warning("API Error caught by generic handler", 
+                                 error_message=error.message, 
+                                 status_code=error.status_code, 
+                                 details=error.details, 
+                                 exception_type=type(error).__name__,
+                                 path=request.path,
+                                 method=request.method)
+            response_dict, status_code = format_error_response(error)
+            return jsonify(response_dict), status_code
+            
+        # For other non-HTTP exceptions, log as 500 and return generic message
         error_logger.error("Unhandled exception occurred", 
                            error=str(error),
                            exception_type=type(error).__name__,

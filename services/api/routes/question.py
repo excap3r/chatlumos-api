@@ -3,7 +3,7 @@ import os
 from flask import Blueprint, request, jsonify, current_app
 
 # Import necessary components used by the endpoint
-# from services.api_gateway import ServiceError # Remove if gateway removed
+from services.api_gateway import ServiceError # Remove if gateway removed
 from services.analytics.analytics_service import AnalyticsEvent
 from services.analytics.analytics_middleware import track_specific_event
 from services.utils.api_helpers import rate_limit, cache_result
@@ -51,14 +51,19 @@ def question():
         # Check for errors returned by the service via the gateway
         if isinstance(result, dict) and "error" in result:
             error_msg = result.get('message', result['error'])
-            status_code = result.get("status_code", 500)
-            current_app.logger.error(f"LLM service /answer failed: {error_msg}", status_code=status_code)
-            raise APIError(f"Failed to get answer: {error_msg}", status_code=status_code)
+            status_code = result.get('status_code', 500)
+            current_app.logger.error(f"LLM service /answer failed: {error_msg}")
+            raise APIError(message=error_msg, status_code=status_code)
 
         return jsonify(result)
-    except ServiceError as e:
-        current_app.logger.error(f"ServiceError communicating with LLM /answer: {str(e)}")
-        raise APIError(f"Failed to communicate with question answering service: {e}", status_code=getattr(e, 'status_code', 503))
+    except APIError as api_err: # Catch specific API errors first
+        raise api_err # Re-raise the original APIError to let handlers manage it
+    except ServiceError as gw_err: # Catch specific Gateway errors
+        current_app.logger.warning(f"Gateway communication error: {str(gw_err)}", exc_info=False)
+        # Convert ServiceError to APIError, preserving status code if possible
+        raise APIError(message=str(gw_err), status_code=gw_err.status_code if hasattr(gw_err, 'status_code') else 502) # Default 502 Bad Gateway
+    except ValidationError as val_err: # Catch validation errors
+        raise val_err # Re-raise validation errors directly
     except Exception as e:
         current_app.logger.error(f"Unexpected error in /question route: {str(e)}", exc_info=True)
         raise APIError(f"An unexpected error occurred processing the question: {str(e)}", status_code=500) 

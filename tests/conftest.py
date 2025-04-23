@@ -155,6 +155,19 @@ def mock_auth():
         return AuthContextManager(**kwargs)
     return _context_manager_factory
 
+# --- Auto-clearing Redis fixture --- #
+
+@pytest.fixture(scope='function', autouse=True)
+def clear_redis(redis_client):
+    """Automatically clears the Redis database after each test function."""
+    yield # Run the test
+    # Teardown: Flush the database
+    try:
+        log.debug("--- Clearing Redis DB after test ---")
+        redis_client.flushdb()
+    except Exception as e:
+        log.error(f"Error flushing Redis DB after test: {e}", exc_info=True)
+
 # --- Core App Fixtures --- #
 
 class TestingConfig:
@@ -201,16 +214,16 @@ class TestingConfig:
     # PINECONE_API_KEY = os.getenv('TEST_PINECONE_API_KEY', 'test-pinecone-key-required') # Removed
     # PINECONE_ENVIRONMENT = os.getenv('TEST_PINECONE_ENVIRONMENT', 'gcp-starter') # Removed
     # PINECONE_INDEX_NAME = os.getenv('TEST_PINECONE_INDEX_NAME', 'test-pdf-wisdom-index') # Removed
-    
+
     # Annoy config for testing (use a temp path)
-    # Consider using pytest's tmp_path fixture dynamically if possible, 
+    # Consider using pytest's tmp_path fixture dynamically if possible,
     # but for simplicity in config class, using a fixed relative path for tests.
-    ANNOY_INDEX_PATH = './test_data/test_vector_index.ann' 
+    ANNOY_INDEX_PATH = './test_data/test_vector_index.ann'
     ANNOY_METRIC = 'angular'
     ANNOY_NUM_TREES = 10 # Use fewer trees for faster test builds
     VECTOR_SEARCH_DIMENSION = None # Let the service determine from model
     DEFAULT_TOP_K = 5
-    
+
     # Add other API keys as needed
     if OPENAI_API_KEY == 'test-openai-key-required':
         log.warning("TestingConfig: TEST_OPENAI_API_KEY not set, using placeholder.")
@@ -246,7 +259,7 @@ def app():
         log.info("Explicitly set app.redis_client to mock redis instance.")
 
         # Add a mock api_gateway attribute for the health check
-        _app.api_gateway = MagicMock() 
+        _app.api_gateway = MagicMock()
         log.info("Added mock api_gateway attribute to the app instance.")
 
         # Store mocks on the app instance for potential access in tests (optional)
@@ -264,8 +277,10 @@ def app():
         else:
             log.info("App Fixture: db_session_factory found on app instance.")
 
+        # --- Clean up after session ---
         yield _app
-        log.info("--- Tearing Down Test App --- ")
+        log.info("--- Tearing Down Test App ---")
+        # Cleanup actions if necessary
 
 @pytest.fixture()
 def client(app: Flask):
@@ -275,124 +290,343 @@ def client(app: Flask):
 @pytest.fixture
 def request_context(app: Flask):
     """Fixture to provide request context for each test."""
-    with app.test_request_context():
-        yield
+    with app.test_request_context() as context:
+        yield context
 
 @pytest.fixture
 def runner(app: Flask):
     """A test runner for the app's Click commands."""
     return app.test_cli_runner()
 
+# --- Header Fixture for Authenticated Requests --- #
+
+@pytest.fixture
+def auth_headers(app, mock_auth):
+    """Generates JWT auth headers for a default test user."""
+    from flask_jwt_extended import create_access_token
+
+    # Use the mock_auth context manager to define the user context
+    with mock_auth() as mocker:
+        # Need an application context to create token
+        with app.app_context(): # Ensure app context is active
+            # The identity for the JWT should typically be the user ID string
+            identity = mocker.user_id
+            # The full user info is available via g.user thanks to mock_auth
+            # identity_dict = {
+            #     "id": mocker.user_id,
+            #     "username": mocker.username,
+            #     "roles": mocker.roles,
+            #     "permissions": mocker.permissions
+            # }
+            access_token = create_access_token(identity=identity)
+        headers = {
+            'Authorization': f'Bearer {access_token}'
+        }
+        log.debug(f"Generated auth_headers for user_id: {mocker.user_id}")
+        return headers
+
+# --- Redis Fixtures --- #
+
 @pytest.fixture(scope='function')
 def redis_client(app):
-    """Provides the app's *mocked* Redis client (FakeRedis) and clears it."""
-    # Get the client that was explicitly set on the app instance in the app fixture
-    client_instance = getattr(app, 'redis_client', None)
+    """Provides a (mocked) Redis client instance cleared for each function."""
+    # The main app fixture already patches redis.from_url and sets app.redis_client
+    # We just need to ensure it's clean for each test.
+    client = app.redis_client
+    if client is None:
+        pytest.fail("Mock Redis client not found on app. Check app fixture setup.")
 
-    if client_instance is None or not isinstance(client_instance, (fakeredis.FakeStrictRedis, fakeredis.FakeRedis)):
-         # This indicates a problem with the app fixture setup
-         pytest.fail(f"Mock Redis client (FakeRedis) not found or is wrong type on app instance. Found: {type(client_instance)}")
-         return None # Should not be reached
+    # Clear the fake redis instance before each test
+    client.flushdb()
+    log.info("Flushed mock Redis database for new test.")
+    yield client
+    # Optional: Clear again after test if needed
+    # client.flushdb()
 
-    assert isinstance(client_instance, (fakeredis.FakeStrictRedis, fakeredis.FakeRedis)), \
-           f"Redis client is not a FakeRedis instance! Type: {type(client_instance)}"
-
-    log.debug("Using fakeredis client for test.")
-    client_instance.flushall() # Clear before test
-    yield client_instance
-    client_instance.flushall() # Clear after test
-    log.debug("Cleared fakeredis client after test.")
-
+# --- Celery Fixtures --- #
 
 @pytest.fixture(scope='session')
 def configured_celery_app(app): # Depend on app to ensure config is loaded
-    """Returns the configured Celery app instance (forces eager tasks)."""
-    log.info("Configuring Celery app for eager testing.")
-    # Ensure Celery uses the test config from the app fixture
-    celery_app.conf.update(app.config)
-    # These might already be set by TestingConfig, but ensures they are applied
-    celery_app.conf.task_always_eager = True
-    celery_app.conf.task_eager_propagates = True
-    return celery_app
+    """Provides the Celery app instance configured for testing (eager)."""
+    # Import celery_app directly to avoid current_app dependency
+    from celery_app import celery_app as celery_instance
+
+    # Configure Celery for testing
+    celery_instance.conf.update(
+        task_always_eager=True,  # Tasks run synchronously
+        task_eager_propagates=True,  # Exceptions propagate
+        broker_url='memory://',  # In-memory broker
+        backend='cache',  # In-memory backend
+        result_backend='cache',  # In-memory results
+        cache_backend='memory',  # In-memory cache
+        worker_hijack_root_logger=False,  # Don't hijack root logger
+        worker_log_color=False,  # No colors in logs
+    )
+
+    # Ensure the app has the celery instance
+    app.celery = celery_instance
+
+    return celery_instance
+
+# --- Database Fixtures (Optional, depending on TestingConfig) --- #
 
 @pytest.fixture(scope='function')
 def db_session(app):
-    """Provides a SQLAlchemy session for a test, handling setup/teardown."""
-    # Check config first before looking for the factory
-    if not app.config.get('SQLALCHEMY_DATABASE_URI'):
-        pytest.skip("DB not configured (SQLALCHEMY_DATABASE_URI is None), skipping test.")
-        return None
+    """
+    Provides a SQLAlchemy session with rollback for isolated tests.
+    Requires TestingConfig.DB_CONFIGURED to be True.
+    Uses the session factory attached directly to the app instance by create_app.
+    """
+    if not TestingConfig.DB_CONFIGURED:
+        pytest.skip("Database tests skipped: Database not configured in TestingConfig.")
 
-    # Now check if the factory was successfully created in create_app
-    if not hasattr(app, 'db_session_factory') or app.db_session_factory is None:
-        log.error("db_session fixture: db_session_factory not found on app. Check DB initialization in create_app and TestingConfig.")
-        pytest.skip("Database session factory could not be found, skipping test.")
-        return None
+    # Ensure the session factory is available directly on the app object
+    if not hasattr(app, 'db_session_factory') or not app.db_session_factory:
+         pytest.fail("SQLAlchemy session factory not found on app.db_session_factory. Check create_app DB initialization.")
 
-    # If factory exists
-    session = app.db_session_factory()
-    log.debug("DB session provided to test.")
-    try:
-        yield session
-    finally:
-        # Ensure session is cleaned up even if test fails
-        log.debug("Cleaning up DB session after test.")
+    session_factory = app.db_session_factory # Use the factory attached by create_app
+
+    # Start a transaction
+    session = session_factory()
+    log.info("DB Session: Starting transaction for test.")
+    # Optional: Setup schema or initial data if needed for all DB tests
+    # You might need app.app_context() here if creating schema
+    # with app.app_context():
+    #     db.create_all() # If using Flask-SQLAlchemy db object
+
+    yield session
+
+    # Rollback the transaction after the test
+    log.info("DB Session: Rolling back transaction after test.")
+    session.rollback()
+    session.close()
+    # Optional: Tear down schema if created per-function
+    # with app.app_context():
+    #     db.drop_all()
+
+# --- Logging Fixture --- #
+
+@pytest.fixture(scope="function", autouse=True)
+def setup_test_logging(request):
+    """Sets up logging level for each test function."""
+    test_name = request.node.name
+    log.info(f"--- Starting test: {test_name} ---")
+
+    # Get the root logger and set the desired level for this test
+    root_logger = logging.getLogger()
+    original_level = root_logger.level
+    root_logger.setLevel(logging.DEBUG) # Set to DEBUG for tests
+    log.debug(f"Set root logger level to DEBUG for {test_name}")
+
+    yield
+
+    # Restore original level after test
+    root_logger.setLevel(original_level)
+    log.debug(f"Restored root logger level to {logging.getLevelName(original_level)} after {test_name}")
+    log.info(f"--- Finished test: {test_name} ---")
+
+# --- Example Mock Dependency Fixture --- #
+
+@pytest.fixture
+def mock_dependencies(redis_client, mocker): # Example dependencies
+    """Provides a dictionary of common mocked dependencies."""
+    return {
+        "redis_client": redis_client,
+        "redis_pipeline": mocker.patch.object(redis_client, 'pipeline', return_value=MagicMock()),
+        # Add other common mocks needed by tasks/services
+        "llm_service": mocker.patch('services.llm_service.llm_service.LLMService'),
+        "vector_search_service": mocker.patch('services.vector_search.vector_search.VectorSearchService'),
+    }
+
+# --- Sample Data Fixtures --- #
+
+@pytest.fixture
+def sample_pdf_path():
+    """Provides the path to a sample PDF file for testing uploads."""
+    # Create a dummy PDF file or use a small existing one
+    # Ensure this path is relative to the project root or accessible
+    pdf_dir = "./test_data"
+    pdf_path = os.path.join(pdf_dir, "dummy_document.pdf")
+    if not os.path.exists(pdf_dir):
+        os.makedirs(pdf_dir)
+    if not os.path.exists(pdf_path):
+        # Create a minimal valid PDF (or copy one)
         try:
-            session.rollback() # Rollback any changes made during the test
-            if hasattr(app, 'db_session_factory') and app.db_session_factory:
-                 app.db_session_factory.remove() # Remove the scoped session
-                 log.debug("DB session rolled back and removed after test.")
-            else:
-                 log.warning("db_session_factory not found on app during teardown, cannot remove session.")
-        except Exception as e:
-             log.error(f"Error during DB session cleanup: {e}", exc_info=True)
+            from reportlab.pdfgen import canvas
+            from reportlab.lib.pagesizes import letter
+            c = canvas.Canvas(pdf_path, pagesize=letter)
+            c.drawString(100, 750, "This is a dummy PDF for testing.")
+            c.save()
+            log.info(f"Created dummy PDF for testing at {pdf_path}")
+        except ImportError:
+            # Fallback: create an empty file, might not work for all tests
+            with open(pdf_path, 'wb') as f:
+                f.write(b'%') # Minimal PDF needs at least %
+            log.warning(f"reportlab not found. Created minimal/empty PDF at {pdf_path}")
+    return pdf_path
 
-# Remove the old fake_redis fixture as it's replaced by redis_client
-# @pytest.fixture(scope='function') 
-# def fake_redis(app):
-#     ...
+@pytest.fixture
+def sample_pdf_bytes(sample_pdf_path):
+     """Provides the content of the sample PDF as bytes."""
+     with open(sample_pdf_path, "rb") as f:
+         return f.read()
 
-# Removed unused celery_config fixture
-# @pytest.fixture(scope='session')
-# def celery_config():
-#    ...
+@pytest.fixture
+def sample_event():
+    """Provides a sample analytics event dictionary."""
+    return {
+        'id': str(uuid.uuid4()),
+        'event_type': 'api_request',
+        'timestamp': datetime.utcnow().isoformat() + 'Z',
+        'user_id': 'test-user-123',
+        'endpoint': '/api/v1/some/endpoint',
+        'method': 'POST',
+        'status_code': 200,
+        'duration_ms': 150.5,
+        'details': {'param1': 'value1'}
+    }
 
-# Keep other fixtures like celery_app if they are used
+@pytest.fixture
+def sample_event_data():
+    """Provides a sample event data for webhook tests."""
+    return {
+        'id': str(uuid.uuid4()),
+        'event_type': 'document_processed',
+        'timestamp': datetime.utcnow().isoformat() + 'Z',
+        'user_id': 'test-user-456',
+        'document_id': 'doc-123',
+        'status': 'completed',
+        'details': {'pages': 5, 'title': 'Test Document'}
+    }
 
-# Note: The celery_app fixture depends on your app structure.
-# If Celery is initialized within create_app, you might need to adapt.
-# Example assumes a standalone celery_app object might be accessible or needed.
-# If your tasks use app context, ensure the test app context is active.
+@pytest.fixture
+def sample_subscription_dict():
+    """Provides a sample webhook subscription dictionary."""
+    return {
+        'id': str(uuid.uuid4()),
+        'url': 'https://example.com/webhook',
+        'event_types': ['document_processed', 'question_answered'],
+        'secret': 'test-webhook-secret-123',
+        'user_id': 'test-user-456',
+        'owner_id': 'test-user-456',
+        'created_at': datetime.utcnow().isoformat() + 'Z',
+        'active': True,
+        'description': None,
+        'last_triggered': None,
+        'last_success': None,
+        'last_failure': None,
+        'success_count': 0,
+        'failure_count': 0,
+        'last_error': None
+    }
 
-# @pytest.fixture(scope='session')
-# def celery_app(app): # Assuming celery app is tied to flask app
-#     app.config.update(CELERY_BROKER_URL='memory://', CELERY_RESULT_BACKEND='rpc://')
-#     celery = create_celery(app) # Your celery factory
-#     celery.conf.task_always_eager = True
-#     return celery
+@pytest.fixture
+def mock_webhook_subscription_class(mocker):
+    """Provides a mocked WebhookSubscription class."""
+    mock_class = mocker.patch('services.analytics.webhooks.schemas.WebhookSubscription')
+    mock_instance = MagicMock()
+    mock_instance.id = 'test-webhook-123'
+    mock_instance.url = 'https://example.com/webhook'
+    mock_instance.secret = 'test-webhook-secret-123'
+    mock_instance.enabled = True
+    mock_class.return_value = mock_instance
+    mock_class.from_dict.return_value = mock_instance
+    return (mock_class, mock_instance)
 
-# Add other shared fixtures below as needed, e.g., mock services 
+@pytest.fixture
+def mock_logging(mocker):
+    """Provides a mocked structlog logger instance."""
+    # Create a mock logger
+    mock_logger = MagicMock()
 
-# Define TestingConfig here or import from config.py if preferred
-# class TestingConfig:
-#     TESTING = True
-#     SECRET_KEY = 'test-secret-key'
-#     # Ensure DB vars are set, e.g., via env or defaults
-#     DB_DRIVER = os.getenv('TEST_DB_DRIVER', 'mysql+pymysql') 
-#     DB_USER = os.getenv('TEST_DB_USER', 'test_db_user') # Use distinct test user
-#     DB_PASSWORD = os.getenv('TEST_DB_PASSWORD', 'test_db_password')
-#     DB_HOST = os.getenv('TEST_DB_HOST', '127.0.0.1') # Often localhost or test container
-#     DB_PORT = os.getenv('TEST_DB_PORT', '3306')
-#     DB_NAME = os.getenv('TEST_DB_NAME', 'test_db_pdf_wisdom') # **Use a separate test DB**
-#     SQLALCHEMY_DATABASE_URI = f"{DB_DRIVER}://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-#     
-#     REDIS_URL = os.getenv('TEST_REDIS_URL', 'redis://localhost:6379/1') # Use test Redis DB
-#     CELERY_BROKER_URL = REDIS_URL 
-#     CELERY_RESULT_BACKEND = REDIS_URL
-#     CELERY_TASK_ALWAYS_EAGER = True
-#     CELERY_TASK_EAGER_PROPAGATES = True
-#
-# # Use mocks for models if needed
-# User = Mock()
-# APIKeyData = Mock()
-# APIKeyDataWithSecret = Mock() 
+    # Patch the get_logger function to return our mock
+    mocker.patch('structlog.get_logger', return_value=mock_logger)
+
+    # Return the mock logger instance itself
+    return mock_logger
+
+@pytest.fixture
+def fake_redis(mocker):
+    """Provides a fake Redis client for testing."""
+    redis_mock = MagicMock()
+
+    # Mock the key-value store with a dictionary
+    redis_data = {}
+
+    # Mock Redis methods
+    def mock_exists(key):
+        return key in redis_data
+
+    def mock_get(key):
+        return redis_data.get(key)
+
+    def mock_set(key, value):
+        redis_data[key] = value
+        return True
+
+    def mock_setex(key, expiry, value):
+        redis_data[key] = value
+        return True
+
+    def mock_delete(key):
+        if key in redis_data:
+            del redis_data[key]
+            return 1
+        return 0
+
+    # Assign the mocked methods
+    redis_mock.exists = mock_exists
+    redis_mock.get = mock_get
+    redis_mock.set = mock_set
+    redis_mock.setex = mock_setex
+    redis_mock.delete = mock_delete
+
+    # Only patch the Redis client in the Flask app if there's an application context
+    try:
+        if has_request_context():
+            mocker.patch.object(current_app, 'redis_client', redis_mock)
+    except RuntimeError:
+        # Working outside of application context, which is fine for some tests
+        pass
+
+    # Create a pipeline mock
+    pipeline_mock = MagicMock()
+    redis_mock.pipeline.return_value = pipeline_mock
+
+    return redis_mock
+
+@pytest.fixture
+def mock_dependencies(fake_redis, mocker):
+    """Provides mocked dependencies for task tests."""
+    # Create a pipeline mock
+    pipeline_mock = MagicMock()
+    fake_redis.pipeline.return_value = pipeline_mock
+
+    # Mock the requests module for webhook tests
+    requests_post_mock = mocker.patch('requests.post')
+    generate_signature_mock = mocker.patch('services.tasks.webhook_tasks._generate_signature')
+
+    # Create LLM and Vector Search service mocks
+    llm_service_mock = MagicMock()
+    vector_search_service_mock = MagicMock()
+
+    # Create AppConfig mock for webhook tests
+    app_config_mock = MagicMock()
+    app_config_mock.WEBHOOK_MAX_RETRIES = 3
+    app_config_mock.WEBHOOK_USER_AGENT = "Test-Webhook-Agent/1.0"
+    app_config_mock.WEBHOOK_TIMEOUT = 5
+    app_config_mock.ANALYTICS_TTL_SECONDS = 3600 # Add missing attribute for analytics tests
+
+    # Mock the update_webhook_stats_in_redis function
+    update_stats_mock = mocker.patch('services.tasks.webhook_tasks._update_webhook_stats_in_redis')
+
+    return {
+        'llm_service': llm_service_mock,
+        'vector_search_service': vector_search_service_mock,
+        'redis_client': fake_redis,
+        'redis_pipeline': pipeline_mock,
+        'requests_post': requests_post_mock,
+        'generate_signature': generate_signature_mock,
+        'AppConfig': app_config_mock,
+        'update_stats': update_stats_mock
+    }

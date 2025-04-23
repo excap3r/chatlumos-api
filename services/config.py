@@ -96,6 +96,8 @@ class AppConfig:
 
     # --- Webhook Settings ---
     # Example: could add WEBHOOK_SECRET_SALT if needed globally
+    WEBHOOK_USER_AGENT = os.getenv("WEBHOOK_USER_AGENT", "ChatlumosWebhook/1.0")
+    WEBHOOK_TIMEOUT = int(os.getenv('WEBHOOK_TIMEOUT', 10)) # Timeout in seconds for webhook requests
 
     # --- PDF Processor Settings ---
     # Example: Could add chunk size/overlap defaults if needed

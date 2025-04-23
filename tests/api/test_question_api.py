@@ -65,8 +65,7 @@ def test_question_missing_question_field(client, mock_auth):
 
     assert response.status_code == 400
     assert 'error' in response.json
-    assert response.json['error'] == 'Validation Error'
-    assert "Missing required field: question" in response.json.get('message', '')
+    assert response.json['error'] == 'Missing required field: question'
 
 def test_question_llm_service_error(client, mock_auth):
     """Test /question fails if the downstream LLM service returns an error."""
@@ -86,8 +85,7 @@ def test_question_llm_service_error(client, mock_auth):
 
     assert response.status_code == 503 # Should match status_code from error payload
     assert 'error' in response.json
-    assert "Failed to get answer" in response.json['error']
-    assert mock_llm_error_response['message'] in response.json['error']
+    assert "The LLM service is overloaded." in response.json['error']
 
     mock_gw_request.assert_called_once()
 
@@ -105,8 +103,7 @@ def test_question_gateway_error(client, mock_auth):
 
     assert response.status_code == 504 # Should match status_code from ServiceError
     assert 'error' in response.json
-    assert "Failed to communicate with question answering service" in response.json['error']
-    assert str(gateway_comm_error) in response.json['error']
+    assert "LLM service unreachable" in response.json['error'] # Check for the specific message from ServiceError
 
     mock_gw_request.assert_called_once()
 

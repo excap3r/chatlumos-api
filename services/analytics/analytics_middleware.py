@@ -12,6 +12,8 @@ from flask import request, g, Flask, current_app
 from typing import Callable, Any
 
 from .analytics_service import AnalyticsEvent, AnalyticsService
+# Import APIError to handle specific error types
+from ..utils.error_utils import APIError, ValidationError
 
 # Set up logging
 logger = structlog.get_logger("analytics_middleware")
@@ -116,8 +118,26 @@ def track_specific_event(event_type: str, include_payload: bool = False) -> Call
             # Call the original function
             try:
                 result = f(*args, **kwargs)
+            except APIError as api_exc: # Catch APIError separately
+                 # Log and track APIError - simplified: just re-raise
+                 user_id = g.get('user', {}).get('id') if hasattr(g, 'user') else None
+                 logger.warning("APIError occurred in tracked function",
+                              event_type=event_type,
+                              function_name=f.__name__,
+                              error=str(api_exc),
+                              status_code=api_exc.status_code,
+                              user_id=user_id,
+                              exc_info=False)
+                 # Skip analytics tracking here, let the dedicated error handler manage it
+                 # try:
+                 #     error_event = AnalyticsEvent(...)
+                 #     ...
+                 # except Exception as tracking_error:
+                 #     ...
+                 raise api_exc # Re-raise the original APIError
+
             except Exception as func_exc:
-                 # Log and track error if the decorated function fails
+                 # Log and track generic error
                  user_id = g.get('user', {}).get('id') if hasattr(g, 'user') else None
                  logger.error("Exception in tracked function", 
                               event_type=event_type, 
@@ -130,7 +150,8 @@ def track_specific_event(event_type: str, include_payload: bool = False) -> Call
                          endpoint=request.path,
                          user_id=user_id,
                          error=f"Error in {event_type}: {str(func_exc)}",
-                         metadata={'original_event_type': event_type}
+                         status_code=500, # Assume 500 for generic exceptions
+                         metadata={'original_event_type': event_type, 'exception_type': type(func_exc).__name__}
                      )
                      # Get service instance from app context
                      analytics_service_inner = getattr(current_app, 'analytics_service', None)
@@ -142,6 +163,9 @@ def track_specific_event(event_type: str, include_payload: bool = False) -> Call
                      logger.error("Error tracking exception within decorator", 
                                   tracking_error=str(tracking_error), 
                                   exc_info=True)
+                 # Wrap generic exception in an APIError before re-raising?
+                 # Or just re-raise, letting the main @app.errorhandler(Exception) handle it.
+                 # For now, re-raise the original to match previous behavior.
                  raise func_exc # Re-raise the original exception
             
             # If function succeeded, track the specific event

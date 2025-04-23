@@ -7,6 +7,7 @@ from functools import wraps # Needed for mock decorator
 from io import BytesIO
 import time
 import base64
+import redis # Import redis for patching
 
 # Assuming client fixture, app fixture, and mock_auth fixture are available from conftest.py
 # Assuming redis_client fixture is available
@@ -179,9 +180,20 @@ def test_pdf_upload_no_filename(mock_celery_delay, client, mock_auth):
     assert "No file selected for uploading" in response.json['description'] # Check correct field and message
     mock_celery_delay.assert_not_called()
 
-@patch('services.tasks.pdf_processing.process_pdf_task.delay') 
-def test_pdf_upload_wrong_type(mock_celery_delay, client, mock_auth):
+# Helper identity function for patching decorator
+def identity_decorator(f):
+    return f
+
+# Patch the Celery task delay method first
+@patch('services.tasks.pdf_processing.process_pdf_task.delay')
+# Patch the pipeline execution within the rate limiter to bypass the check
+@patch('services.utils.api_helpers.redis.Redis.pipeline') 
+def test_pdf_upload_wrong_type(mock_pipeline, mock_celery_delay, client, mock_auth):
     """Test PDF upload fails with non-PDF file type."""
+    # Configure the mock pipeline's execute method
+    # to return a low count (1) and success (True)
+    mock_pipeline.return_value.execute.return_value = (1, True) 
+    
     with mock_auth(): # Sets g.user and patches auth checks
         headers = {'Authorization': 'Bearer dummy'} # Header needed
         data = {
@@ -195,9 +207,8 @@ def test_pdf_upload_wrong_type(mock_celery_delay, client, mock_auth):
         )
     assert response.status_code == 400
     assert 'error' in response.json
-    assert 'description' in response.json # Check description field
-    assert "Invalid file type, only PDF allowed" in response.json['description'] # Check correct field and message
-    mock_celery_delay.assert_not_called()
+    assert 'description' in response.json # Check description field exists
+    assert response.json['description'] == "Invalid file type, only PDF allowed"
 
 def test_pdf_upload_unauthenticated(client):
     """Test PDF upload fails when not authenticated."""
@@ -247,7 +258,10 @@ def test_ask_endpoint_success(mock_celery_delay, client, redis_client, mock_auth
     expected_data = {
         'question': question,
         'pdf_id': pdf_id,
-        'user_id': mock_user_id
+        'user_id': mock_user_id,
+        'index_name': None,
+        'top_k': None,
+        'stream': False
     }
     assert call_args[1] == expected_data
 

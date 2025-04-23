@@ -65,6 +65,7 @@ def handle_db_session(func):
              # or are handled specifically within the function before this decorator catches them.
              # If they can occur *after* a commit attempt fails, rollback might be needed.
              # For now, assume they are caught appropriately or happen before commit issues.
+             # Re-raise these specific exceptions directly.
              raise
         except Exception as e:
             session.rollback()

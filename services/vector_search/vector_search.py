@@ -27,7 +27,7 @@ DEFAULT_ANNOY_NUM_TREES = 50
 class VectorSearchService:
     """Service for local vector search operations using Annoy."""
     # Class-level lock for thread safety during index build/save/load
-    _lock = threading.Lock()
+    _lock = threading.RLock()  # Using RLock instead of Lock to allow reentrant locking
 
     def __init__(self, config: Dict[str, Any]):
         """
@@ -79,7 +79,7 @@ class VectorSearchService:
 
             # Initialize Annoy index (lazy loading)
             self.index = AnnoyIndex(self.dimension, self.metric)
-            logger.info("Annoy index structure initialized (will load/build on demand)", 
+            logger.info("Annoy index structure initialized (will load/build on demand)",
                          dimension=self.dimension, metric=self.metric)
 
             # Attempt to load existing index and metadata
@@ -96,7 +96,7 @@ class VectorSearchService:
         with VectorSearchService._lock:
             if self._index_loaded:
                 return # Already loaded
-                
+
             index_file_exists = os.path.exists(self.index_path)
             metadata_file_exists = os.path.exists(self.metadata_path)
 
@@ -106,19 +106,19 @@ class VectorSearchService:
                     with open(self.metadata_path, 'r') as f:
                         self.metadata_map = {int(k): v for k, v in json.load(f).items()} # Ensure keys are int
                     self._index_loaded = True
-                    logger.info("Loaded existing Annoy index and metadata", 
-                                 index_path=self.index_path, 
+                    logger.info("Loaded existing Annoy index and metadata",
+                                 index_path=self.index_path,
                                  metadata_path=self.metadata_path,
                                  item_count=self.index.get_n_items())
                 except Exception as e:
-                    logger.error("Failed to load existing Annoy index/metadata. Re-initializing.", 
+                    logger.error("Failed to load existing Annoy index/metadata. Re-initializing.",
                                  index_path=self.index_path, metadata_path=self.metadata_path, error=str(e), exc_info=True)
                     # Reset state if loading failed
                     self.index.unload() # Ensure unloaded
                     self.metadata_map = {}
-                    self._index_loaded = False 
+                    self._index_loaded = False
             elif index_file_exists or metadata_file_exists:
-                 logger.warning("Annoy index file or metadata file exists, but not both. Re-initializing index.", 
+                 logger.warning("Annoy index file or metadata file exists, but not both. Re-initializing index.",
                                   index_exists=index_file_exists, meta_exists=metadata_file_exists)
                  # Clean up potentially orphaned file
                  if index_file_exists: os.remove(self.index_path)
@@ -133,21 +133,21 @@ class VectorSearchService:
         """Save Annoy index and metadata to files."""
         if not self.index:
              raise RuntimeError("Annoy index is not initialized.")
-        
+
         with VectorSearchService._lock:
             try:
                 # Create directory if it doesn't exist
                 index_dir = os.path.dirname(self.index_path)
                 if index_dir and not os.path.exists(index_dir):
                     os.makedirs(index_dir, exist_ok=True)
-                    
+
                 self.index.save(self.index_path)
                 with open(self.metadata_path, 'w') as f:
                     # Ensure keys in metadata_map are strings for JSON compatibility
                     json.dump({str(k): v for k, v in self.metadata_map.items()}, f)
-                logger.info("Saved Annoy index and metadata", 
-                             index_path=self.index_path, 
-                             metadata_path=self.metadata_path, 
+                logger.info("Saved Annoy index and metadata",
+                             index_path=self.index_path,
+                             metadata_path=self.metadata_path,
                              item_count=self.index.get_n_items())
             except Exception as e:
                 logger.error("Failed to save Annoy index/metadata", error=str(e), exc_info=True)
@@ -172,7 +172,7 @@ class VectorSearchService:
         if not documents:
             logger.warning("Attempted to add empty batch of documents.", user_id=user_id)
             return 0, 0
-        
+
         # Ensure index is loaded
         self._load_index()
 
@@ -189,10 +189,10 @@ class VectorSearchService:
 
         try:
             embeddings = self._get_embedding(texts_to_embed)
-            
+
             with VectorSearchService._lock: # Lock during index modification
                 current_item_index = self.index.get_n_items()
-                
+
                 for i, embedding in enumerate(embeddings):
                     original_doc_index = original_indices[i]
                     text, metadata = documents[original_doc_index]
@@ -201,7 +201,7 @@ class VectorSearchService:
                     metadata_with_user = metadata.copy()
                     metadata_with_user['user_id'] = str(user_id)
                     metadata_with_user['_text_preview'] = text[:100] # Store preview for debugging
-                    
+
                     self.metadata_map[current_item_index] = metadata_with_user
                     self.index.add_item(current_item_index, embedding)
                     current_item_index += 1
@@ -209,14 +209,14 @@ class VectorSearchService:
                     needs_rebuild = True # Mark that index needs rebuild after adding
 
             logger.info("Documents added to Annoy index structure", added_count=added_count, user_id=user_id)
-            
+
             # Rebuild and save the index if items were added
             if needs_rebuild:
                 logger.info(f"Building Annoy index with {self.num_trees} trees...")
                 self.index.build(self.num_trees)
                 logger.info("Annoy index build complete.")
                 self._save_index() # Save index and metadata
-                
+
             return added_count, failure_count
 
         except Exception as e:
@@ -247,13 +247,13 @@ class VectorSearchService:
             search_k = -1 # Default search_k (-1 means N*num_trees where N=top_k)
             if filter:
                 # If filtering, search more candidates to increase chance of finding matches
-                search_k_multiplier = self.config.get('ANNOY_FILTER_SEARCH_K_MULTIPLIER', 10) 
+                search_k_multiplier = self.config.get('ANNOY_FILTER_SEARCH_K_MULTIPLIER', 10)
                 search_k = top_k * search_k_multiplier * self.num_trees
-            
+
             annoy_indices, distances = self.index.get_nns_by_vector(
-                query_embedding, 
+                query_embedding,
                 top_k * 10, # Fetch more initially if filtering later
-                search_k=search_k, 
+                search_k=search_k,
                 include_distances=True
             )
 
@@ -264,23 +264,23 @@ class VectorSearchService:
             for idx, dist in zip(annoy_indices, distances):
                 if len(results) >= top_k:
                     break # Stop once we have enough results
-                    
+
                 metadata = self.metadata_map.get(idx)
                 if not metadata:
                     logger.warning(f"Metadata not found for Annoy index {idx}")
                     continue
-                
+
                 # --- Apply Filtering --- #
                 # 1. Check user_id
                 if metadata.get('user_id') != target_user_id:
                     continue # Skip if user_id doesn't match
-                
+
                 # 2. Apply additional filter if provided
                 if filter:
                     match = True
                     for filter_key, filter_value in filter.items():
                         if filter_key == 'user_id': continue # Already checked
-                        
+
                         metadata_value = metadata.get(filter_key)
                         # Simple equality check for now, could be extended
                         # Handle potential type mismatches (e.g., filter value is int, metadata is str)
@@ -300,7 +300,7 @@ class VectorSearchService:
                 # --- End Filtering --- #
 
                 # Convert Annoy distance (angular) to similarity score (cosine)
-                # Cosine similarity = (2 - distance^2) / 2 
+                # Cosine similarity = (2 - distance^2) / 2
                 # For angular distance: similarity = cos(theta) = (2 - d^2) / 2
                 # For euclidean: similarity depends, maybe 1 / (1 + distance)
                 # For dot: similarity = distance
@@ -311,9 +311,9 @@ class VectorSearchService:
                      similarity_score = dist
                 else: # Euclidean or others, use distance directly or inverse
                      similarity_score = 1.0 / (1.0 + dist) # Example for Euclidean
-                
+
                 result_item = {
-                    'id': metadata.get('chunk_id') or metadata.get('document_id') or idx, # Use stored ID if available
+                    'id': metadata.get('id') or metadata.get('chunk_id') or metadata.get('document_id') or idx, # Add 'id' check
                     'score': similarity_score,
                     'metadata': metadata
                 }
@@ -326,34 +326,34 @@ class VectorSearchService:
             logger.error("Failed to execute Annoy query", user_id=user_id, query_preview=query_text[:50]+"...", error=str(e), exc_info=True)
             return [] # Return empty list on error
 
-    def delete_user_data(self, user_id: str) -> bool:
+    def delete_user_data(self, user_id: str) -> int:
         """Delete all vectors and metadata associated with a specific user_id."""
         if not self.index:
             raise RuntimeError("Annoy index is not initialized.")
-        
+
         target_user_id = str(user_id)
         logger.warning("Attempting to delete all vector data for user", user_id=target_user_id)
-        
+
         with VectorSearchService._lock: # Lock for modification
             # Ensure index is loaded
             self._load_index()
-            
+
             items_to_remove = [idx for idx, meta in self.metadata_map.items() if meta.get('user_id') == target_user_id]
-            
+
             if not items_to_remove:
                 logger.info("No data found for user to delete.", user_id=target_user_id)
-                return True # Nothing to delete
-                
+                return 0 # Return 0 items deleted
+
             logger.info(f"Found {len(items_to_remove)} items to remove for user {target_user_id}")
-            
-            # Annoy doesn't directly support item deletion. The standard approach is 
+
+            # Annoy doesn't directly support item deletion. The standard approach is
             # to rebuild the index excluding the items.
-            
+
             # 1. Create a new temporary index
             new_index = AnnoyIndex(self.dimension, self.metric)
             new_metadata_map = {}
             new_item_counter = 0
-            
+
             # 2. Iterate through old items and add only those NOT belonging to the user
             for old_idx in range(self.index.get_n_items()):
                 if old_idx not in items_to_remove:
@@ -363,27 +363,27 @@ class VectorSearchService:
                         new_index.add_item(new_item_counter, vector)
                         new_metadata_map[new_item_counter] = metadata
                         new_item_counter += 1
-            
+
             # 3. Build the new index
             logger.info(f"Rebuilding index to remove user data. New item count: {new_item_counter}")
             new_index.build(self.num_trees)
-            
+
             # 4. Replace old index and metadata with new ones
             self.index.unload() # Unload old index memory
             self.index = new_index
             self.metadata_map = new_metadata_map
             self._index_loaded = True # Mark the new index as loaded
-            
+
             # 5. Save the new index and metadata
             try:
                 self._save_index()
                 logger.info("Successfully rebuilt and saved index after deleting user data", user_id=target_user_id)
-                return True
+                return len(items_to_remove)
             except Exception as e:
                  logger.error("Failed to save rebuilt index after deleting user data", user_id=target_user_id, error=str(e))
                  # State might be inconsistent here, potential data loss?
                  # Consider recovery strategies or raising a critical error.
-                 return False # Indicate save failed
+                 return len(items_to_remove) # Still return the count of removed items
 
     # Maybe add other utility methods like: get_index_stats, etc.
 

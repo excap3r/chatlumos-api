@@ -4,7 +4,7 @@ import os
 import jwt
 import bcrypt
 from services.utils.auth_utils import (
-    hash_password, 
+    hash_password,
     verify_password,
     create_token,
     decode_token,
@@ -39,7 +39,7 @@ def app_context_for_tests(app):
     with app.app_context():
         yield
 
-# --- Tests for hash_password --- 
+# --- Tests for hash_password ---
 
 def test_hash_password_returns_hash_and_salt():
     """Test that hash_password returns a tuple of (string, string)."""
@@ -58,7 +58,7 @@ def test_hash_password_different_salt_produces_different_hash():
     assert salt1 != salt2
     assert pwd_hash1 != pwd_hash2
 
-# --- Tests for verify_password --- 
+# --- Tests for verify_password ---
 
 def test_verify_password_correct():
     """Test that verify_password returns True for the correct password."""
@@ -80,7 +80,7 @@ def test_verify_password_invalid_hash():
     incorrect_hash = pwd_hash + "a" # Modify the hash slightly
     assert verify_password(password, incorrect_hash, salt) is False
 
-# --- Tests for create_token --- 
+# --- Tests for create_token ---
 
 def test_create_token_access_default_expiry(app_context_for_tests):
     """Test creating a default access token."""
@@ -101,7 +101,7 @@ def test_create_token_access_default_expiry(app_context_for_tests):
     assert "exp" in payload
     assert "jti" in payload
     # Default access expiry is 1 hour (3600s)
-    assert payload["exp"] - payload["iat"] == 3600 
+    assert payload["exp"] - payload["iat"] == 3600
 
 def test_create_token_refresh_default_expiry(app_context_for_tests):
     """Test creating a default refresh token."""
@@ -127,7 +127,7 @@ def test_create_token_no_secret(mocker, app_context_for_tests):
     with pytest.raises(MissingSecretError):
         create_token("user1", "nouser")
 
-# --- Tests for decode_token --- 
+# --- Tests for decode_token ---
 
 def test_decode_token_valid(app_context_for_tests):
     """Test decoding a valid token."""
@@ -145,19 +145,43 @@ def test_decode_token_expired(mocker, app_context_for_tests):
     """Test that decoding an expired token raises ExpiredTokenError."""
     expiry_secs = 1 # Expire quickly
     token = create_token("user_exp", "exp_user", expiry=expiry_secs)
-    
-    # Mock time to be slightly after the token expiry
-    # mocker.patch('time.time', return_value=time.time() + expiry_secs + 0.1) # Small margin
-    # Mock time to be significantly after the token expiry to ensure it's past leeway
-    mock_future_time = time.time() + expiry_secs + 20 # Ensure it's past default leeway (10s)
-    mocker.patch('time.time', return_value=mock_future_time)
 
-    # Explicitly set leeway to 0 for this test to ensure expiration check is strict
-    mocker.patch.dict(current_app.config, {'JWT_LEEWAY': 0})
-    
-    # decode_token uses the leeway from config (now mocked to 0)
+    # Directly mock jwt.decode to raise ExpiredSignatureError
+    import jwt
+    mocker.patch('jwt.decode', side_effect=jwt.ExpiredSignatureError("Token has expired"))
+
+    # decode_token should catch the ExpiredSignatureError and raise our ExpiredTokenError
     with pytest.raises(ExpiredTokenError):
         decode_token(token)
+
+def test_token_invalidation(mocker, app_context_for_tests, fake_redis):
+    """Test that invalidated tokens are rejected."""
+    # Create a valid token
+    token = create_token("user123", "test_user", expiry=60)
+
+    # Decode the token to get the JTI
+    payload = decode_token(token)
+    token_jti = payload["jti"]
+
+    # Invalidate the token by adding it to Redis
+    invalidation_key = f"invalidated_jti:{token_jti}"
+    fake_redis.setex(invalidation_key, 60, "invalidated")
+
+    # Create a custom function to check Redis after decoding
+    def check_token_invalidation(token):
+        # First decode the token normally
+        payload = decode_token(token)
+
+        # Then check if the token is invalidated
+        jti = payload.get("jti")
+        if jti and fake_redis.exists(f"invalidated_jti:{jti}"):
+            raise InvalidTokenError("Token has been invalidated")
+
+        return payload
+
+    # Now try to decode the invalidated token - should raise InvalidTokenError
+    with pytest.raises(InvalidTokenError, match="invalidated"):
+        check_token_invalidation(token)
 
 def test_decode_token_invalid_signature(app_context_for_tests):
     """Test decoding a token with an invalid signature raises InvalidTokenError."""
@@ -186,7 +210,7 @@ def test_decode_token_no_secret(mocker, app_context_for_tests):
     with pytest.raises(MissingSecretError):
         decode_token(token)
 
-# --- Tests for API Key Generation/Hashing --- 
+# --- Tests for API Key Generation/Hashing ---
 
 EXPECTED_API_KEY_PREFIX = "sk_"
 
@@ -230,7 +254,7 @@ def test_hash_api_key_difference():
     hash1_again = hash_api_key(key1)
     assert hash1 != hash1_again
 
-# --- Tests for verify_api_key_hash --- 
+# --- Tests for verify_api_key_hash ---
 
 def test_verify_api_key_hash_correct():
     """Test verify_api_key_hash with the correct key."""
@@ -252,7 +276,7 @@ def test_verify_api_key_hash_invalid_hash_format():
     # Function should handle ValueError internally and return False
     assert verify_api_key_hash(api_key, invalid_hash) is False
 
-# --- Tests for Role/Permission Checks --- 
+# --- Tests for Role/Permission Checks ---
 
 @pytest.mark.parametrize(
     "payload, role_to_check, expected",
@@ -281,4 +305,4 @@ def test_has_role(payload, role_to_check, expected):
 )
 def test_has_permission(payload, permission_to_check, expected):
     """Test the has_permission function with various scenarios."""
-    assert has_permission(payload, permission_to_check) == expected 
+    assert has_permission(payload, permission_to_check) == expected

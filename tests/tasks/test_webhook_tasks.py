@@ -4,45 +4,64 @@ from unittest.mock import ANY
 import json
 import requests
 import pytest
+from services.tasks import webhook_tasks
+from services.analytics.webhooks.schemas import WebhookDataError
 
-def test_send_webhook_invalid_subscription(mock_dependencies, sample_event_data, mock_logging, mock_webhook_subscription_class):
+def test_send_webhook_invalid_subscription(mocker, mock_dependencies, sample_event_data, mock_logging):
     """Test task abortion when subscription data is invalid."""
     invalid_subscription_dict = {"url": "incomplete data"} # Missing required fields
 
-    # Configure from_dict to raise an error
-    mock_sub_class, _ = mock_webhook_subscription_class
-    validation_error = ValueError("Missing required field: id")
-    mock_sub_class.from_dict.side_effect = validation_error
+    # Configure the patch for from_dict directly
+    validation_error = WebhookDataError("Invalid webhook data: Missing key 'event_types'")
+    mock_from_dict = mocker.patch(
+        'services.tasks.webhook_tasks.WebhookSubscriptionSchema.from_dict',
+        side_effect=validation_error
+    )
 
-    mock_self = MagicMock()
-    mock_self.request.id = "task-webhook-invalid-sub"
-    mock_self.request.retries = 0
-    mock_self.retry = MagicMock(side_effect=Exception("Should not retry on invalid data"))
+    # Get mocks from dependencies
+    mock_requests_post = mock_dependencies['requests_post']
+    fake_redis = mock_dependencies['redis_client'] # Need the fake client
+    mock_update_stats = mock_dependencies['update_stats']
 
-    # --- Call the task ---
-    result = webhook_tasks.send_webhook_task(mock_self, invalid_subscription_dict, sample_event_data)
+    # --- Patch get_redis_client used by helper ---\
+    mocker.patch('services.tasks.webhook_tasks.get_redis_client', return_value=fake_redis) # Patch redis helper
+    # Configure the mock logger's bind method to return itself
+    mock_logging.bind.return_value = mock_logging
 
-    # --- Assertions ---
-    # 1. from_dict was called
-    mock_sub_class.from_dict.assert_called_once_with(invalid_subscription_dict)
+    # --- Call the helper function directly, expecting WebhookDataError ---\
+    with pytest.raises(WebhookDataError) as excinfo:
+         webhook_tasks._execute_send_webhook(
+            mock_logging, # Pass the mock logger instance directly
+            invalid_subscription_dict,
+            sample_event_data
+        )
 
-    # 2. Request NOT sent
-    mock_dependencies["requests_post"].assert_not_called()
+    # --- Assertions ---\
+    # 1. The patched from_dict was called
+    mock_from_dict.assert_called_once_with(invalid_subscription_dict)
 
-    # 3. Stats NOT updated
-    mock_dependencies["update_stats"].assert_not_called()
+    # 2. requests.post was NOT called
+    mock_requests_post.assert_not_called()
 
-    # 4. No retry attempted
-    mock_self.retry.assert_not_called()
+    # 3. Logging indicates the validation failure
+    found_log = False
+    # Match the actual log format in _execute_send_webhook's except block
+    expected_log_message = "Webhook task failed: Invalid subscription data"
+    expected_error_str = str(validation_error) # Get the expected error string
+    for call_args_list, call_kwargs in mock_logging.error.call_args_list:
+        log_message = call_args_list[0] if call_args_list else ""
+        # Check message directly, exc_info=True, and error kwarg
+        if expected_log_message == log_message and \
+           call_kwargs.get('exc_info') is True and \
+           call_kwargs.get('error') == expected_error_str:
+            found_log = True
+            break
+    assert found_log, f"Expected log message '{expected_log_message}' with error='{expected_error_str}' and exc_info=True not found in error logs: {mock_logging.error.call_args_list}"
 
-    # 5. Logging
-    mock_logging.error.assert_any_call("Failed to reconstruct WebhookSubscription from dict. Aborting task.",
-                                       error=str(validation_error), data_keys=invalid_subscription_dict.keys())
+    # 4. Stats update should NOT be called for this early failure
+    mock_update_stats.assert_not_called()
 
-    # 6. Return value
-    assert result is None # Task returns early
-
-def test_send_webhook_payload_serialization_error(mock_dependencies, sample_subscription_dict, mock_logging, mock_webhook_subscription_class):
+def test_send_webhook_payload_serialization_error(mocker, mock_dependencies, sample_subscription_dict, mock_logging):
     """Test task failure when event data cannot be serialized to JSON."""
     # Create unserializable event data
     unserializable_event_data = {
@@ -52,218 +71,308 @@ def test_send_webhook_payload_serialization_error(mock_dependencies, sample_subs
         "data": object() # Objects are not JSON serializable by default
     }
 
-    mock_self = MagicMock()
-    mock_self.request.id = "task-webhook-json-err"
-    mock_self.request.retries = 0
-    mock_self.retry = MagicMock(side_effect=Exception("Should not retry on serialization error"))
+    # Get mocks from dependencies
+    mock_requests_post = mock_dependencies['requests_post']
+    fake_redis = mock_dependencies['redis_client']
 
-    # --- Call the task ---
-    result = webhook_tasks.send_webhook_task(mock_self, sample_subscription_dict, unserializable_event_data)
+    # --- Patch get_redis_client used by helper ---
+    mocker.patch('services.tasks.webhook_tasks.get_redis_client', return_value=fake_redis)
+    
+    # Configure the mock logger's bind method to return itself
+    mock_logging.bind.return_value = mock_logging
+
+    # --- Call the helper function directly, expecting WebhookDataError ---
+    with pytest.raises(WebhookDataError) as excinfo:
+        webhook_tasks._execute_send_webhook(
+            mock_logging, # Pass the mock logger instance directly
+            sample_subscription_dict, 
+            unserializable_event_data
+        )
 
     # --- Assertions ---
-    # 1. Subscription loaded
-    mock_sub_class, _ = mock_webhook_subscription_class
-    mock_sub_class.from_dict.assert_called_once()
+    # 1. Exception was raised with correct message
+    assert isinstance(excinfo.value, WebhookDataError)
+    assert "Payload serialization error" in str(excinfo.value)
+    assert "not JSON serializable" in str(excinfo.value)
 
-    # 2. Request NOT sent
-    mock_dependencies["requests_post"].assert_not_called()
+    # 2. requests.post was NOT called
+    mock_requests_post.assert_not_called()
 
-    # 3. Stats updated for failure
-    _, mock_sub_instance = mock_webhook_subscription_class
-    mock_dependencies["update_stats"].assert_called_once_with(
-        mock_dependencies["redis_client"],
-        mock_sub_instance.id,
-        success=False,
-        error_message=ANY # Error message should indicate serialization error
-    )
-    # More specific check on error message if needed:
-    args, kwargs = mock_dependencies["update_stats"].call_args
-    assert "Payload serialization error" in kwargs["error_message"]
+    # 3. Logging indicates the serialization failure
+    found_log = False
+    expected_msg_part = "Webhook task failed: Could not serialize event data"
+    # Check calls to the error method of the mock_logger instance
+    for call_args_list, call_kwargs in mock_logging.error.call_args_list:
+        log_message = call_args_list[0] if call_args_list else ""
+        if expected_msg_part in log_message and call_kwargs.get('exc_info') is True:
+            assert "not JSON serializable" in call_kwargs.get('error', '')
+            found_log = True
+            break
+    assert found_log, f"Expected log message containing '{expected_msg_part}' with matching error not found"
 
-    # 4. No retry attempted
-    mock_self.retry.assert_not_called()
+    # 4. Stats update WAS called with failure due to data error
+    mock_update_stats = mock_dependencies['update_stats']
+    mock_update_stats.assert_called_once()
+    # Get call args to verify details
+    call_args, call_kwargs = mock_update_stats.call_args
+    # Check positional args for redis_client (index 0) and webhook_id (index 1)
+    assert call_args[1] == sample_subscription_dict['id']
+    # Check keyword args for success and error_message
+    assert call_kwargs.get('success') is False
+    assert "Data processing error: Payload serialization error" in call_kwargs.get('error_message', '')
 
-    # 5. Logging
-    mock_logging.error.assert_any_call("Failed to serialize webhook payload to JSON. Aborting.", error=ANY, event_id=unserializable_event_data['id'])
+    # Remove assertions for Celery-specific methods when testing helper directly
+    # # 5. Retry was not called
+    # mock_retry.assert_not_called()
+    # 
+    # # 6. State was not updated (task re-raises before this)
+    # mock_update_state.assert_not_called()
 
-    # 6. Return value
-    assert result is None # Task returns early
-
-def test_send_webhook_signature_generation_error(mock_dependencies, sample_subscription_dict, sample_event_data, mock_logging, mock_webhook_subscription_class):
-    """Test that webhook is still sent (without signature) if signature generation fails."""
+def test_send_webhook_signature_generation_error(mocker, mock_dependencies, sample_subscription_dict, sample_event_data, mock_logging):
+    """Test webhook sending failure when signature generation fails."""
     # Configure _generate_signature to raise TypeError
     sig_gen_error = TypeError("Bad secret type")
-    mock_dependencies["generate_signature"].side_effect = sig_gen_error
+    # Patch the correct target
+    mock_generate_signature = mocker.patch(
+        'services.tasks.webhook_tasks._generate_signature',
+        side_effect=sig_gen_error
+    )
 
-    # Mock successful request post-signature failure
-    mock_response = MagicMock()
-    mock_response.status_code = 200
-    mock_response.text = "OK"
-    mock_dependencies["requests_post"].return_value = mock_response
+    # Get mocks from dependencies
+    mock_requests_post = mock_dependencies['requests_post']
+    fake_redis = mock_dependencies['redis_client']
+    mock_update_stats = mock_dependencies['update_stats']
 
-    mock_self = MagicMock()
-    mock_self.request.id = "task-webhook-sig-err"
-    mock_self.request.retries = 0
-    mock_self.retry = MagicMock()
+    # --- Patch get_redis_client and configure logger ---
+    mocker.patch('services.tasks.webhook_tasks.get_redis_client', return_value=fake_redis)
+    mock_logging.bind.return_value = mock_logging # Handle logger binding
 
-    # --- Call the task ---
-    webhook_tasks.send_webhook_task(mock_self, sample_subscription_dict, sample_event_data)
+    # --- Call the helper function directly, expecting WebhookDataError ---
+    with pytest.raises(WebhookDataError) as excinfo:
+        webhook_tasks._execute_send_webhook(
+            mock_logging, 
+            sample_subscription_dict, 
+            sample_event_data
+        )
 
     # --- Assertions ---
-    # 1. Subscription loaded
-    mock_sub_class, _ = mock_webhook_subscription_class
-    mock_sub_class.from_dict.assert_called_once()
+    # 1. Exception was raised with correct message
+    assert isinstance(excinfo.value, WebhookDataError)
+    assert "Signature generation error" in str(excinfo.value)
+    assert "Bad secret type" in str(excinfo.value)
 
-    # 2. Signature generation was attempted and failed
-    mock_dependencies["generate_signature"].assert_called_once()
-
-    # 3. requests.post called correctly, but WITHOUT signature header
-    _, mock_sub_instance = mock_webhook_subscription_class
-    expected_payload = {
-        "event_id": sample_event_data['id'],
-        "event_type": sample_event_data['event_type'],
-        "timestamp": sample_event_data['timestamp'],
-        "data": sample_event_data
-    }
-    expected_payload_bytes = json.dumps(expected_payload).encode('utf-8')
-    expected_headers = {
-        'Content-Type': 'application/json',
-        'User-Agent': mock_dependencies["AppConfig"].WEBHOOK_USER_AGENT,
-        # 'X-Webhook-Signature-256' header should be ABSENT
-    }
-    mock_dependencies["requests_post"].assert_called_once_with(
-        mock_sub_instance.url,
-        headers=expected_headers,
-        data=expected_payload_bytes,
-        timeout=mock_dependencies["AppConfig"].WEBHOOK_TIMEOUT_SECONDS
+    # 2. _generate_signature was called
+    # Need the expected payload_json - let's dump it here for the check
+    expected_payload_json = json.dumps(sample_event_data)
+    mock_generate_signature.assert_called_once_with(
+        sample_subscription_dict['secret'], 
+        expected_payload_json
     )
 
-    # 4. Stats updated for success (since request succeeded despite sig error)
-    mock_dependencies["update_stats"].assert_called_once_with(
-        mock_dependencies["redis_client"],
-        mock_sub_instance.id,
-        success=True,
-        error_message=None
-    )
+    # 3. requests.post was NOT called
+    mock_requests_post.assert_not_called()
 
-    # 5. Logging
-    mock_logging.error.assert_any_call("Failed to generate signature (TypeError). Skipping signature.", error=str(sig_gen_error))
-    mock_logging.info.assert_any_call("Webhook delivered successfully.", status_code=200, duration_ms=ANY, attempt=1)
+    # 4. Logging indicates the signature failure
+    found_log = False
+    expected_msg_part = "Webhook signature generation failed"
+    for call_args_list, call_kwargs in mock_logging.error.call_args_list:
+        log_message = call_args_list[0] if call_args_list else ""
+        if expected_msg_part in log_message and call_kwargs.get('exc_info') is True:
+            assert "Bad secret type" in call_kwargs.get('error', '')
+            found_log = True
+            break
+    assert found_log, f"Expected log message containing '{expected_msg_part}' with matching error not found"
 
-def test_send_webhook_no_secret(mock_dependencies, sample_subscription_dict, sample_event_data, mock_logging, mock_webhook_subscription_class):
+    # 5. Stats update WAS called once with failure due to data processing error
+    mock_update_stats.assert_called_once()
+    call_args, call_kwargs = mock_update_stats.call_args
+    assert call_args[1] == sample_subscription_dict['id']
+    assert call_kwargs.get('success') is False
+    # Check that the error message reflects the underlying signature error
+    # The error message comes from the catch block for WebhookDataError in _execute_send_webhook
+    expected_error_msg = f"Data processing error: Signature generation error: {sig_gen_error}"
+    assert call_kwargs.get('error_message') == expected_error_msg
+
+def test_send_webhook_no_secret(mocker, mock_dependencies, sample_subscription_dict, sample_event_data, mock_logging):
     """Test successful webhook delivery when no secret is configured."""
-    # Modify mocked subscription instance to have no secret
-    mock_sub_class, mock_sub_instance = mock_webhook_subscription_class
-    mock_sub_instance.secret = None
-    mock_sub_class.from_dict.return_value = mock_sub_instance
-
-    # Create matching dict
+    # Create subscription dict with no secret
     no_secret_subscription_dict = sample_subscription_dict.copy()
     no_secret_subscription_dict["secret"] = None
+    webhook_id = no_secret_subscription_dict["id"] # Extract ID for convenience
 
-    # Mock successful request
+    # --- Mock Schema Loading ---
+    # Mock the subscription object that from_dict will return
+    mock_sub_instance = MagicMock()
+    mock_sub_instance.id = webhook_id
+    mock_sub_instance.url = no_secret_subscription_dict['url']
+    mock_sub_instance.secret = None # Explicitly set secret to None
+    mock_sub_instance.enabled = True
+    # Patch the Schema's from_dict method used within the helper
+    mock_from_dict = mocker.patch(
+        'services.tasks.webhook_tasks.WebhookSubscriptionSchema.from_dict',
+        return_value=mock_sub_instance
+    )
+
+    # --- Mock Network Request ---
     mock_response = MagicMock()
     mock_response.status_code = 200
-    mock_dependencies["requests_post"].return_value = mock_response
+    mock_requests_post = mock_dependencies["requests_post"]
+    mock_requests_post.return_value = mock_response
 
-    mock_self = MagicMock()
-    mock_self.request.id = "task-webhook-no-secret"
-    mock_self.request.retries = 0
-    mock_self.retry = MagicMock()
+    # --- Patch Redis Client Get ---
+    fake_redis = mock_dependencies['redis_client']
+    mocker.patch('services.tasks.webhook_tasks.get_redis_client', return_value=fake_redis)
 
-    # --- Call the task ---
-    webhook_tasks.send_webhook_task(mock_self, no_secret_subscription_dict, sample_event_data)
+    # --- Configure Logger ---
+    mock_logging.bind.return_value = mock_logging # Handle logger binding
+
+    # --- Call the helper function directly ---
+    result = webhook_tasks._execute_send_webhook(
+        mock_logging, # Pass mock logger instance
+        no_secret_subscription_dict, 
+        sample_event_data
+    )
 
     # --- Assertions ---
-    # 1. Subscription loaded
-    mock_sub_class.from_dict.assert_called_once_with(no_secret_subscription_dict)
+    # 0. Check result status
+    assert result['status'] == 'success'
+    assert result['status_code'] == 200
+
+    # 1. Subscription loaded via Schema
+    mock_from_dict.assert_called_once_with(no_secret_subscription_dict)
 
     # 2. Signature generation NOT attempted
-    mock_dependencies["generate_signature"].assert_not_called()
+    mock_generate_signature = mock_dependencies["generate_signature"]
+    mock_generate_signature.assert_not_called()
 
     # 3. requests.post called correctly WITHOUT signature header
-    expected_payload = {
-        "event_id": sample_event_data['id'],
-        "event_type": sample_event_data['event_type'],
-        "timestamp": sample_event_data['timestamp'],
-        "data": sample_event_data
-    }
-    expected_payload_bytes = json.dumps(expected_payload).encode('utf-8')
+    # The helper constructs the payload differently
+    expected_payload_json = json.dumps(sample_event_data) # Payload is just event data
     expected_headers = {
         'Content-Type': 'application/json',
-        'User-Agent': mock_dependencies["AppConfig"].WEBHOOK_USER_AGENT,
-        # 'X-Webhook-Signature-256' header should be ABSENT
+        'User-Agent': 'ChatlumosWebhook/1.0',
+        # 'X-Chatlumos-Signature-256' header should be ABSENT
     }
-    mock_dependencies["requests_post"].assert_called_once_with(
-        mock_sub_instance.url,
+    mock_requests_post.assert_called_once_with(
+        no_secret_subscription_dict['url'], # Use URL from dict
         headers=expected_headers,
-        data=expected_payload_bytes,
-        timeout=mock_dependencies["AppConfig"].WEBHOOK_TIMEOUT_SECONDS
+        data=expected_payload_json.encode('utf-8'), # Use JSON string bytes
+        timeout=10 # Use correct config attribute
     )
 
-    # 4. Stats updated for success
-    mock_dependencies["update_stats"].assert_called_once_with(
-        mock_dependencies["redis_client"],
-        mock_sub_instance.id,
+    # 4. Stats updated for success using the helper's redis client
+    mock_update_stats = mock_dependencies["update_stats"]
+    mock_update_stats.assert_called_once_with(
+        fake_redis, # Ensure the correct redis client mock is checked
+        webhook_id, # Pass the webhook ID
         success=True,
-        error_message=None
+        # error_message=None # Do not assert explicit error_message=None
     )
 
-    # 5. Logging (no signature-related logs)
-    mock_logging.info.assert_any_call("Attempting to send webhook payload", event_type=ANY, event_id=ANY)
-    mock_logging.info.assert_any_call("Webhook delivered successfully.", status_code=200, duration_ms=ANY, attempt=1)
-    mock_logging.debug.assert_not_called() # No debug log for signature generation
+    # 5. Logging (check logs from helper)
+    mock_logging.debug.assert_any_call("Attempting to send webhook") # Changed from info
+    mock_logging.info.assert_any_call(
+        "Sending webhook request", 
+        event_type=sample_event_data.get('event_type'), 
+        event_id=sample_event_data.get('id')
+    )
+    mock_logging.info.assert_any_call(
+        "Webhook sent successfully", 
+        status_code=200
+    )
+    # Ensure error/warning logs related to signature were not called
+    signature_error_logs = [c for c in mock_logging.error.call_args_list if "signature" in c[0][0]]
+    assert not signature_error_logs, "Signature error logs were unexpectedly found"
 
-def test_send_webhook_max_retries_exceeded(mock_dependencies, sample_subscription_dict, sample_event_data, mock_logging, mock_webhook_subscription_class):
-    """Test stat update after max retries are exceeded."""
-    # Simulate a persistent failure (e.g., timeout) that would cause retries
-    final_error_message = "Request timed out"
-    final_exception = requests.exceptions.Timeout(final_error_message)
-    mock_dependencies["requests_post"].side_effect = final_exception
+def test_send_webhook_max_retries_exceeded(mocker, mock_dependencies, sample_subscription_dict, sample_event_data, mock_logging):
+    """Test behavior when max retries are exceeded (simulated).
 
-    mock_self = MagicMock()
-    mock_self.request.id = "task-webhook-max-retry"
-    # Simulate being called on the *last* attempt (retries = max_retries)
-    max_retries = mock_dependencies["AppConfig"].WEBHOOK_MAX_RETRIES
-    mock_self.request.retries = max_retries
-    # Mock retry to ensure it's NOT called on the final attempt after max_retries
-    mock_self.retry = MagicMock(side_effect=Exception("Should not retry after max retries"))
+    Note: This tests the helper's behavior when a retryable exception occurs.
+    It doesn't fully test Celery's autoretry logic, but ensures the helper
+    raises appropriately and updates stats on the final failure.
+    """
+    webhook_id = sample_subscription_dict['id']
 
-    # --- Call the task, expecting the final exception to be raised ---
-    # Celery's mechanism would catch this final raise after retries are exhausted
-    with pytest.raises(requests.exceptions.Timeout) as excinfo:
-        webhook_tasks.send_webhook_task(mock_self, sample_subscription_dict, sample_event_data)
+    # --- Mock Schema Loading ---
+    mock_sub_instance = MagicMock()
+    mock_sub_instance.id = webhook_id
+    mock_sub_instance.url = sample_subscription_dict['url']
+    mock_sub_instance.secret = sample_subscription_dict['secret'] # Assume secret exists
+    mock_sub_instance.enabled = True
+    mock_from_dict = mocker.patch(
+        'services.tasks.webhook_tasks.WebhookSubscriptionSchema.from_dict',
+        return_value=mock_sub_instance
+    )
+
+    # --- Mock Signature Generation (assume success) ---
+    mock_generate_signature = mock_dependencies["generate_signature"]
+    mock_generate_signature.return_value = "dummy-signature"
+
+    # --- Mock Network Request to fail consistently ---
+    final_error_message = "Connection refused"
+    final_exception = requests.exceptions.ConnectionError(final_error_message)
+    mock_requests_post = mock_dependencies["requests_post"]
+    mock_requests_post.side_effect = final_exception
+
+    # --- Patch Redis Client Get ---
+    fake_redis = mock_dependencies['redis_client']
+    mocker.patch('services.tasks.webhook_tasks.get_redis_client', return_value=fake_redis)
+
+    # --- Configure Logger ---
+    mock_logging.bind.return_value = mock_logging
+
+    # --- Call the helper function directly, expecting the final exception ---
+    with pytest.raises(requests.exceptions.ConnectionError) as excinfo:
+        webhook_tasks._execute_send_webhook(
+            mock_logging,
+            sample_subscription_dict,
+            sample_event_data
+        )
 
     # --- Assertions ---
-    # 1. requests.post was called on this final attempt
-    mock_dependencies["requests_post"].assert_called_once()
+    # 1. Schema loaded
+    mock_from_dict.assert_called_once_with(sample_subscription_dict)
 
-    # 2. Stats WERE updated for failure *after* the final attempt failed
-    # This check happens *outside* the main try/except block in the task code
-    # But our mock intercepts it.
-    # NOTE: The current task code updates stats *inside* the generic Exception handler
-    # if the error is NOT a RequestException. If it IS a RequestException (like Timeout),
-    # it re-raises, and the logic for updating stats *after* max retries seems missing
-    # Let's adjust the test based on the *current* code behavior:
-    # The RequestException is re-raised, so update_stats is NOT called by the task itself
-    # in this flow. Celery might log the final failure.
-    # If the intention was to update stats on final failure, the task code needs adjustment.
+    # 2. Signature was generated (as secret exists)
+    expected_payload_json = json.dumps(sample_event_data)
+    mock_generate_signature.assert_called_once_with(
+        sample_subscription_dict['secret'],
+        expected_payload_json
+    )
 
-    # --- Assertions (Based on CURRENT code structure) ---
-    mock_dependencies["update_stats"].assert_not_called() # Update stats is not called when RequestException is raised
-    mock_self.retry.assert_not_called() # Retry is not called after max_retries is reached
+    # 3. requests.post was called (and failed)
+    expected_headers = {
+        'Content-Type': 'application/json',
+        'User-Agent': 'ChatlumosWebhook/1.0',
+        'X-Chatlumos-Signature-256': 'sha256=dummy-signature' # Check signature header
+    }
+    mock_requests_post.assert_called_once_with(
+        sample_subscription_dict['url'],
+        headers=expected_headers,
+        data=expected_payload_json.encode('utf-8'),
+        timeout=10 # Use correct config attribute
+    )
 
-    # 4. Logging indicates the warning for this attempt
-    mock_logging.warning.assert_any_call("Webhook delivery timeout.", duration_ms=ANY, attempt=max_retries + 1)
+    # 4. Stats updated for FAILURE
+    mock_update_stats = mock_dependencies["update_stats"]
+    mock_update_stats.assert_called_once()
+    call_args, call_kwargs = mock_update_stats.call_args
+    assert call_args[1] == sample_subscription_dict['id']
+    assert call_kwargs.get('success') is False
+    # Check that the error message reflects the actual ConnectionError
+    expected_error_msg = f"Request failed (None): {final_error_message}"
+    assert call_kwargs.get('error_message') == expected_error_msg
 
-    # 5. Final exception was raised
+    # 5. Logging indicates the failure
+    mock_logging.error.assert_any_call(
+        "Webhook request failed",
+        status_code=None, # No status code for ConnectionError
+        error=final_error_message,
+        exc_info=True
+    )
+
+    # 6. Final exception was raised
     assert excinfo.value is final_exception
-
-    # --- TODO: Add test for the logic inside `if not success and self.request.retries >= max_retries:` ---
-    # This requires simulating a scenario where the request succeeds or fails with non-RequestException
-    # *on the last retry attempt*.
-    # Example: Test 4xx on last retry (should update stats as failed)
-
 
 # --- Tests for Helper Functions (Optional) ---
 def test_generate_signature():

@@ -77,7 +77,8 @@ def ask_question():
         'error': None, # Placeholder for error info
         # Add question and pdf_id for clarity in Redis state
         'question': data.get('question'),
-        'pdf_id': data.get('pdf_id')
+        'pdf_id': data.get('pdf_id'),
+        'stream': str(data.get('stream', False)) # Store stream state in Redis
     }
     # Filter out None values or convert them to empty strings before storing in Redis
     redis_initial_state = {k: (v if v is not None else "") for k, v in initial_state.items()}
@@ -98,17 +99,18 @@ def ask_question():
         task_data = {
             'question': data.get('question'),
             'pdf_id': data.get('pdf_id'),
-            'user_id': user_id
+            'user_id': user_id,
+            'stream': data.get('stream', False), # Include stream parameter
+            'index_name': data.get('index_name'), # Include index_name
+            'top_k': data.get('top_k') # Include top_k
         }
         process_question_task.delay(task_id, task_data)
         logger.info(f"Enqueued question processing task {task_id} with Celery.")
     except Exception as e:
         logger.error(f"Failed to enqueue Celery task {task_id}: {e}", exc_info=True)
-        # Attempt to clean up Redis state if enqueuing fails? Maybe not, user can retry.
-        # For now, just return error.
-        # Use APIError
-        # return handle_error(f"Failed to enqueue processing task: {e}", 500)
-        raise APIError(f"Failed to enqueue processing task: {e}", 500)
+        # Re-raise the original exception to preserve its status code/details
+        # raise APIError(f"Failed to enqueue processing task: {e}", 500) 
+        raise e
     
     # Return task ID for client to poll progress endpoint
     return jsonify({"task_id": task_id, "status": "Processing started"}), 202

@@ -30,9 +30,10 @@ Flask-JWT-Extended # Added for authentication
 Werkzeug==2.3.8  # Match Flask version
 gunicorn==23.0.0
 gevent==24.2.1 # For Gunicorn worker type
+bcrypt==4.3.0 # For password hashing
 
 # Input Validation
-pydantic # Added for robust input validation
+pydantic[email] # Added for robust input validation with email support
 
 # Caching
 redis==5.0.4
@@ -70,4 +71,4 @@ uvicorn
 flask-swagger-ui==4.11.1
 
 # ML models
-transformers 
+transformers

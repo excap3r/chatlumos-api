@@ -8,6 +8,7 @@ import redis
 from datetime import datetime
 from celery import Task
 from typing import Dict, Any, Optional
+from celery.exceptions import MaxRetriesExceededError
 
 # Import the Celery app instance
 from celery_app import celery_app
@@ -20,6 +21,10 @@ if TYPE_CHECKING:
     # Import only for type checking to avoid circular dependency
     from services.analytics.webhooks.webhook_service import WebhookSubscription
 
+from services.analytics.webhooks.webhook_service import WebhookSubscription # Corrected import path
+from services.analytics.webhooks.schemas import WebhookSubscription as WebhookSubscriptionSchema, WebhookDataError # Import the schema
+from .analytics_tasks import get_redis_client # Import the redis client helper
+
 logger = structlog.get_logger(__name__)
 
 # Constants from WebhookService (or get from config passed to task)
@@ -27,15 +32,13 @@ DEFAULT_MAX_RETRY_COUNT = 3
 DEFAULT_WEBHOOK_TIMEOUT = 5
 DEFAULT_WEBHOOK_USER_AGENT = "PDFWisdomExtractor-Webhook/1.0"
 
-def _generate_signature(payload_body: bytes, secret: str) -> str:
+def _generate_signature(secret: str, message: str) -> str:
     """Generate HMAC-SHA256 signature for the payload."""
-    if not isinstance(payload_body, bytes):
-         payload_body = payload_body.encode('utf-8')
     if not isinstance(secret, str):
          logger.error("Webhook secret is not a string, cannot generate signature.")
          raise TypeError("Webhook secret must be a string")
 
-    hashed = hmac.new(secret.encode('utf-8'), payload_body, hashlib.sha256)
+    hashed = hmac.new(secret.encode('utf-8'), message.encode('utf-8'), hashlib.sha256)
     return hashed.hexdigest()
 
 def _update_webhook_stats_in_redis(redis_client, webhook_id: str, success: bool, error_message: Optional[str] = None):
@@ -96,137 +99,119 @@ def _update_webhook_stats_in_redis(redis_client, webhook_id: str, success: bool,
     except Exception as e:
         logger.error("Unexpected error setting up stat update", webhook_id=webhook_id, error=str(e), exc_info=True)
 
-
-# Define the Celery task
-# Use bind=True to access self for retry logic
-@celery_app.task(bind=True, 
-                 autoretry_for=(requests.exceptions.RequestException,), 
-                 retry_backoff=True, 
-                 retry_backoff_max=60, # Max backoff seconds
-                 retry_jitter=True)
-def send_webhook_task(self: Task, subscription_dict: dict, event_data: dict):
-    """
-    Celery task to send a webhook payload asynchronously with retries.
-    Handles signature generation and updates stats in Redis.
-    """
-    task_logger = structlog.get_logger(f"task.{self.request.id or 'webhook'}")
-    redis_client = get_redis_client() # Get Redis client for stats update
-
+# --- Helper function for core logic ---
+def _execute_send_webhook(task_logger, subscription_dict: Dict, event_data: Dict):
+    """Core logic for sending a webhook, handling errors."""
     try:
-        # Reconstruct subscription object (optional, could just use dict)
-        subscription = WebhookSubscription.from_dict(subscription_dict)
-    except (ValueError, KeyError) as e:
-         task_logger.error("Failed to reconstruct WebhookSubscription from dict. Aborting task.", error=str(e), data_keys=subscription_dict.keys())
-         # Cannot update stats if ID is missing or invalid
-         return # Do not retry if data is invalid
+        # Reconstruct subscription object
+        subscription = WebhookSubscriptionSchema.from_dict(subscription_dict)
+    except WebhookDataError as e:
+        task_logger.error(
+            "Webhook task failed: Invalid subscription data",
+            error=str(e),
+            exc_info=True
+        )
+        raise # Re-raise the specific data error
 
     webhook_id = subscription.id
-    task_logger = task_logger.bind(webhook_id=webhook_id, url=subscription.url) # Add context
+    task_logger = task_logger.bind(webhook_id=webhook_id, url=subscription.url)
 
     if not subscription.enabled:
-        task_logger.info("Skipping disabled webhook.")
-        return # Don't send if disabled
+        task_logger.info("Webhook subscription is disabled, skipping task.")
+        return {"status": "skipped", "reason": "disabled"} # Return status
 
-    # Prepare payload (same as in original service)
-    payload = {
-        "event_id": event_data.get('id'),
-        "event_type": event_data.get('event_type'),
-        "timestamp": event_data.get('timestamp'),
-        "data": event_data
-    }
+    task_logger.debug("Attempting to send webhook")
+
     try:
-        payload_json = json.dumps(payload)
-        payload_bytes = payload_json.encode('utf-8')
-    except TypeError as e:
-         task_logger.error("Failed to serialize webhook payload to JSON. Aborting.", error=str(e), event_id=payload.get('event_id'))
-         _update_webhook_stats_in_redis(redis_client, webhook_id, success=False, error_message=f"Payload serialization error: {e}")
-         return # Do not retry if payload is invalid
-
-    headers = {
-        'Content-Type': 'application/json',
-        'User-Agent': AppConfig.WEBHOOK_USER_AGENT or DEFAULT_WEBHOOK_USER_AGENT # Get from AppConfig
-    }
-
-    if subscription.secret:
+        # Serialize payload
         try:
-            signature = _generate_signature(payload_bytes, subscription.secret)
-            headers['X-Webhook-Signature-256'] = f"sha256={signature}"
-            task_logger.debug("Generated webhook signature.")
+            payload_json = json.dumps(event_data)
         except TypeError as e:
-            task_logger.error("Failed to generate signature (TypeError). Skipping signature.", error=str(e))
-            # Continue without signature? Or fail? Let's continue for now.
+            task_logger.error(
+                "Webhook task failed: Could not serialize event data",
+                event_id=event_data.get('id'),
+                error=str(e),
+                exc_info=True
+            )
+            raise WebhookDataError(f"Payload serialization error: {e}") from e
 
-    success = False
-    last_error_message = None
-    response_status = None
-    response_preview = None
+        # Generate signature if secret exists
+        signature = None
+        if subscription.secret:
+            try:
+                 signature = _generate_signature(subscription.secret, payload_json)
+            except Exception as e:
+                 task_logger.error("Webhook signature generation failed", error=str(e), exc_info=True)
+                 raise WebhookDataError(f"Signature generation error: {e}") from e
 
-    task_logger.info("Attempting to send webhook payload", event_type=payload['event_type'], event_id=payload['event_id'])
-    start_time = time.time()
-    
-    try:
+        # Prepare headers
+        headers = {
+            'Content-Type': 'application/json',
+            'User-Agent': AppConfig.WEBHOOK_USER_AGENT or DEFAULT_WEBHOOK_USER_AGENT
+        }
+        if signature:
+            headers['X-Chatlumos-Signature-256'] = f"sha256={signature}"
+
+        # Make the request
+        task_logger.info("Sending webhook request", event_type=event_data.get('event_type'), event_id=event_data.get('id'))
         response = requests.post(
             subscription.url,
             headers=headers,
-            data=payload_bytes,
-            timeout=AppConfig.WEBHOOK_TIMEOUT_SECONDS or DEFAULT_WEBHOOK_TIMEOUT # Get from AppConfig
+            data=payload_json.encode('utf-8'),
+            timeout=AppConfig.WEBHOOK_TIMEOUT or DEFAULT_WEBHOOK_TIMEOUT
         )
-        duration = (time.time() - start_time) * 1000
-        response_status = response.status_code
-        response_preview = response.text[:200]
+        response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
 
-        if 200 <= response.status_code < 300:
-            success = True
-            task_logger.info("Webhook delivered successfully.", 
-                         status_code=response_status, duration_ms=duration, attempt=self.request.retries + 1)
-        else:
-            last_error_message = f"Request failed with status {response_status}. Response: {response_preview}"
-            task_logger.warning("Webhook delivery failed (non-2xx status).", 
-                         status_code=response_status, attempt=self.request.retries + 1)
-            # Raise an exception to trigger Celery's autoretry based on status code?
-            # For now, rely on RequestException autoretry. If status is 4xx, maybe don't retry?
-            if 400 <= response.status_code < 500:
-                 # Client error - unlikely to succeed on retry. Stop retrying.
-                 task_logger.error("Webhook delivery failed with client error (4xx). Aborting retries.")
-                 # Fall through to update stats as failure without raising/retrying
-                 pass
-            else:
-                 # Server error (5xx) or other non-2xx - raise to retry
-                 response.raise_for_status() # Raise HTTPError for non-2xx status
+        task_logger.info("Webhook sent successfully", status_code=response.status_code)
+        _update_webhook_stats_in_redis(get_redis_client(), webhook_id, success=True)
+        return {"status": "success", "status_code": response.status_code}
 
     except requests.exceptions.Timeout as e:
-        # Caught by autoretry_for=(requests.exceptions.RequestException,)
-        duration = (time.time() - start_time) * 1000
-        last_error_message = f"Request timed out after {AppConfig.WEBHOOK_TIMEOUT_SECONDS or DEFAULT_WEBHOOK_TIMEOUT} seconds."
-        task_logger.warning("Webhook delivery timeout.", duration_ms=duration, attempt=self.request.retries + 1)
-        # Let Celery handle retry via raise e
-        raise e 
+        task_logger.warning("Webhook request timed out", error=str(e))
+        error_msg = f"Timeout error: {e}"
+        _update_webhook_stats_in_redis(get_redis_client(), webhook_id, success=False, error_message=error_msg)
+        raise # Re-raise to allow Celery retry
     except requests.exceptions.RequestException as e:
-         # Caught by autoretry_for - let Celery handle retry
-        duration = (time.time() - start_time) * 1000
-        last_error_message = f"Request failed: {str(e)}"
-        task_logger.warning("Webhook delivery failed (request exception).", 
-                             error=str(e), duration_ms=duration, attempt=self.request.retries + 1)
-        raise e # Re-raise for Celery retry mechanism
+        status_code = e.response.status_code if e.response is not None else None
+        task_logger.error("Webhook request failed", status_code=status_code, error=str(e), exc_info=True)
+        error_msg = f"Request failed ({status_code}): {e}"
+        _update_webhook_stats_in_redis(get_redis_client(), webhook_id, success=False, error_message=error_msg)
+        raise # Re-raise to allow Celery retry
+    except WebhookDataError as e:
+        # Catch errors raised earlier (serialization, signature)
+        task_logger.warning("Webhook task failed due to data processing error before sending", error=str(e))
+        _update_webhook_stats_in_redis(get_redis_client(), webhook_id, success=False, error_message=f"Data processing error: {e}") # Use specific error
+        raise # Re-raise the specific data error (don't retry)
     except Exception as e:
-         # Catch unexpected errors not covered by autoretry
-         duration = (time.time() - start_time) * 1000
-         last_error_message = f"Unexpected error during webhook send: {str(e)}"
-         task_logger.error("Unexpected error sending webhook payload. Aborting retries.", 
-                            error=str(e), duration_ms=duration, attempt=self.request.retries + 1, exc_info=True)
-         # Update stats directly as failed and do not retry
-         _update_webhook_stats_in_redis(redis_client, webhook_id, success=False, error_message=last_error_message)
-         # Explicitly update Celery state? For now, just return.
-         return # Stop processing this task
+        task_logger.error("Unexpected error during webhook sending", error=str(e), exc_info=True)
+        error_msg = f"Unexpected error: {e}"
+        _update_webhook_stats_in_redis(get_redis_client(), webhook_id, success=False, error_message=error_msg)
+        raise # Re-raise to allow Celery retry or mark as failure
 
-    # Update stats only after final attempt (success or max retries exceeded)
-    # Celery's retry mechanism handles the looping/waiting
-    # This block runs *after* the try/except finishes, either successfully or after exhausting retries.
-    if not success and self.request.retries >= (AppConfig.WEBHOOK_MAX_RETRIES or DEFAULT_MAX_RETRY_COUNT):
-         task_logger.error("Webhook delivery failed after max retries.", max_retries=self.request.retries +1)
-         # Use the last error message recorded during the attempts
-         _update_webhook_stats_in_redis(redis_client, webhook_id, success=False, error_message=last_error_message)
-    elif success:
-         # Update stats on success
-         _update_webhook_stats_in_redis(redis_client, webhook_id, success=True, error_message=None)
-    # else: it was a failure but will be retried by Celery, stats updated on final failure. 
+@celery_app.task(
+    bind=True,
+    # Define exceptions for automatic retry
+    autoretry_for=(requests.exceptions.RequestException, WebhookDataError),
+    retry_backoff=True,
+    # Remove retry_kwargs - access config inside task if needed for explicit retry calls
+    # retry_kwargs={'max_retries': AppConfig.WEBHOOK_MAX_RETRIES if AppConfig else DEFAULT_MAX_RETRY_COUNT}
+)
+def send_webhook_task(self: Task, subscription_dict: Dict, event_data: Dict):
+    """Celery task wrapper to send a single webhook event."""
+    task_logger = structlog.get_logger(f"task.{self.request.id or 'webhook'}")
+    try:
+        return _execute_send_webhook(task_logger, subscription_dict, event_data)
+    except WebhookDataError as e:
+        # Log data errors specifically, Celery will mark as failed due to unhandled exc
+        task_logger.error("Webhook task failed permanently due to data error", error=str(e), exc_info=True)
+        # No need to update state here, let Celery handle it
+        raise # Re-raise so Celery marks as FAILURE
+    except Exception as e:
+        task_logger.error("Unhandled exception reached task wrapper", error=str(e), exc_info=True)
+        # For unexpected errors that might not be caught by autoretry_for,
+        # ensure state is updated if needed, though Celery usually does.
+        try:
+            self.update_state(state='FAILURE', meta={'exc_type': type(e).__name__, 'exc_message': str(e)})
+        except Exception as state_exc:
+            task_logger.error("Failed to update task state after unhandled exception", state_update_error=str(state_exc))
+        raise # Re-raise so Celery marks as FAILURE 
