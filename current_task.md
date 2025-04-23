@@ -5,8 +5,9 @@
 - [x] Explain history rewriting options (BFG vs. filter-branch) and ask for user preference.
 - ~~[ ] Option A: BFG Repo-Cleaner~~
 - [/] **Option B: git filter-branch** (Selected)
-    - [ ] Determine the full path of `Miniconda3-latest-MacOSX-arm64.sh` in the repository.
-    - [ ] Run filter-branch: `git filter-branch --force --index-filter 'git rm --cached --ignore-unmatch FULL/PATH/TO/Miniconda3-latest-MacOSX-arm64.sh' --prune-empty --tag-name-filter cat -- --all` (Replace FULL/PATH/TO/)
+    - [x] Determine the full path of `Miniconda3-latest-MacOSX-arm64.sh` in the repository (Assumed root).
+    - [x] Commit/stash unstaged changes.
+    - [ ] Run filter-branch: `git filter-branch --force --index-filter 'git rm --cached --ignore-unmatch Miniconda3-latest-MacOSX-arm64.sh' --prune-empty --tag-name-filter cat -- --all`
     - [ ] Clean up references: `git for-each-ref --format='delete %(refname)' refs/original | git update-ref --stdin`
     - [ ] Expire reflog: `git reflog expire --expire=now --all`
     - [ ] Garbage collect: `git gc --prune=now --aggressive`
